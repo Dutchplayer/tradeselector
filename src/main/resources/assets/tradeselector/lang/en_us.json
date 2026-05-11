@@ -1,0 +1,8 @@
+{
+  "key.tradeselector.open_gui": "Open Trade Selector",
+  "key.tradeselector.bind_villager": "Bind Villager",
+  "key.tradeselector.bind_job_block": "Bind Lectern",
+  "key.tradeselector.start_automation": "Start Automation",
+  "key.tradeselector.stop_automation": "Stop Automation",
+  "category.tradeselector": "Trade Selector"
+}

@@ -2,8 +2,9 @@
 	"required": true,
 	"package": "dutchplayer.tradeselector.mixin",
 	"compatibilityLevel": "JAVA_21",
-	"mixins": [
-		"ExampleMixin"
+	"client": [
+		"MinecraftClientMixin",
+		"WindowMixin"
 	],
 	"injectors": {
 		"defaultRequire": 1

@@ -2,10 +2,10 @@
 	"schemaVersion": 1,
 	"id": "tradeselector",
 	"version": "${version}",
-	"name": "TradeSelector",
-	"description": "This is an example description! Tell everyone what your mod is about!",
+	"name": "Trade Selector",
+	"description": "Client-side mod for automated librarian enchanted book trade rerolling",
 	"authors": [
-		"Me!"
+		"DutchPlayer"
 	],
 	"contact": {
 		"homepage": "https://fabricmc.net/",
@@ -13,13 +13,13 @@
 	},
 	"license": "CC0-1.0",
 	"icon": "assets/tradeselector/icon.png",
-	"environment": "*",
+	"environment": "client",
 	"entrypoints": {
 		"main": [
-			"dutchplayer.tradeselector.TradeSelector"
+			"dutchplayer.tradeselector.TradeRerollMod"
 		],
-		"fabric-datagen": [
-			"dutchplayer.tradeselector.TradeSelectorDataGenerator"
+		"client": [
+			"dutchplayer.tradeselector.TradeRerollModClient"
 		]
 	},
 	"mixins": [
