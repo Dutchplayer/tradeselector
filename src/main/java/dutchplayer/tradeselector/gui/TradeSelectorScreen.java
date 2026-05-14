@@ -3,8 +3,10 @@ package dutchplayer.tradeselector.gui;
 import dutchplayer.tradeselector.automation.TradeScanner;
 import dutchplayer.tradeselector.config.ConfigManager;
 import dutchplayer.tradeselector.config.ModConfig;
+import dutchplayer.tradeselector.util.PlayerMessages;
 import net.minecraft.client.gui.Font;
 import net.minecraft.client.gui.GuiGraphics;
+import net.minecraft.client.gui.components.AbstractWidget;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.CycleButton;
 import net.minecraft.client.gui.components.EditBox;
@@ -12,6 +14,7 @@ import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
 
 import java.util.Arrays;
+import java.util.Comparator;
 import java.util.List;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -23,10 +26,12 @@ public class TradeSelectorScreen extends Screen {
     private Dropdown<String> enchantmentDropdown;
     private CycleButton<ModConfig.LevelMode> levelModeButton;
     private Dropdown<ModConfig.SuccessSound> successSoundDropdown;
+    private CycleButton<Boolean> lecternRecoveryWalkButton;
     private EditBox exactLevelField;
     private EditBox minLevelField;
     private EditBox maxLevelField;
     private EditBox maxPriceField;
+    private Button saveButton;
 
     private final TradeScanner tradeScanner = new TradeScanner();
 
@@ -40,7 +45,9 @@ public class TradeSelectorScreen extends Screen {
         int panelY = (this.height - PANEL_HEIGHT) / 2;
         ModConfig config = ConfigManager.getConfig();
 
-        List<String> enchantments = Arrays.asList(getAvailableEnchantments());
+        List<String> enchantments = Arrays.stream(getAvailableEnchantments())
+                .sorted(Comparator.comparing(this::displayName, String.CASE_INSENSITIVE_ORDER))
+                .toList();
         String initialEnchant = enchantments.contains(config.targetTrade.enchantment)
                 ? config.targetTrade.enchantment
                 : "minecraft:mending";
@@ -83,15 +90,20 @@ public class TradeSelectorScreen extends Screen {
                 value -> {}
         );
 
+        lecternRecoveryWalkButton = CycleButton.onOffBuilder(config.settings.enableLecternRecoveryWalk)
+                .create(panelX + 120, panelY + 182, 120, 20, Component.literal("Recovery Walk"), (button, value) -> {});
+
         addRenderableWidget(levelModeButton);
+        addRenderableWidget(lecternRecoveryWalkButton);
         addRenderableWidget(exactLevelField);
         addRenderableWidget(minLevelField);
         addRenderableWidget(maxLevelField);
         addRenderableWidget(maxPriceField);
 
-        addRenderableWidget(Button.builder(Component.literal("Save Config"), button -> saveConfiguration())
+        saveButton = Button.builder(Component.literal("Save Config"), button -> saveConfiguration(true))
                 .bounds(panelX + 20, panelY + 204, 290, 20)
-                .build());
+                .build();
+        addRenderableWidget(saveButton);
 
         updateLevelFieldsVisibility();
         clampLevelFieldsToSelectedEnchantment();
@@ -99,8 +111,11 @@ public class TradeSelectorScreen extends Screen {
 
     @Override
     public void render(GuiGraphics graphics, int mouseX, int mouseY, float delta) {
+        super.render(graphics, mouseX, mouseY, delta);
+        
         int panelX = (this.width - PANEL_WIDTH) / 2;
         int panelY = (this.height - PANEL_HEIGHT) / 2;
+        
         graphics.fill(panelX, panelY, panelX + PANEL_WIDTH, panelY + PANEL_HEIGHT, 0xFF202020);
         graphics.renderOutline(panelX, panelY, PANEL_WIDTH, PANEL_HEIGHT, 0xFF707070);
 
@@ -110,8 +125,17 @@ public class TradeSelectorScreen extends Screen {
         graphics.drawString(this.font, "Level (max " + selectedEnchantmentMaxLevel() + ")", panelX + 20, panelY + 98, 0xCCCCCC, false);
         graphics.drawString(this.font, "Max Price", panelX + 20, panelY + 128, 0xCCCCCC, false);
         graphics.drawString(this.font, "Success Sound", panelX + 20, panelY + 158, 0xCCCCCC, false);
+        graphics.drawString(this.font, "Recovery Walk", panelX + 20, panelY + 188, 0xCCCCCC, false);
 
-        super.render(graphics, mouseX, mouseY, delta);
+        renderEditBoxBackground(graphics, exactLevelField, mouseX, mouseY, 0xFF606666, 0xFF707777, 0xFF000000, 0xFF8A8A8A);
+        renderEditBoxBackground(graphics, minLevelField, mouseX, mouseY, 0xFF606666, 0xFF707777, 0xFF000000, 0xFF8A8A8A);
+        renderEditBoxBackground(graphics, maxLevelField, mouseX, mouseY, 0xFF606666, 0xFF707777, 0xFF000000, 0xFF8A8A8A);
+        renderEditBoxBackground(graphics, maxPriceField, mouseX, mouseY, 0xFF606666, 0xFF707777, 0xFF000000, 0xFF8A8A8A);
+        renderButtonBackground(graphics, levelModeButton, 0xFF353535, 0xFF454545, 0xFF8A8A8A, 0xFFFFFFFF, false);
+        renderButtonBackground(graphics, lecternRecoveryWalkButton, 0xFF353535, 0xFF454545, 0xFF8A8A8A, 0xFFFFFFFF, false);
+        renderButtonBackground(graphics, saveButton, 0xFF353535, 0xFF454545, 0xFF8A8A8A, 0xFFFFFFFF,
+                enchantmentDropdown.isOpen() || successSoundDropdown.isOpen());
+
         enchantmentDropdown.renderButton(graphics, mouseX, mouseY);
         successSoundDropdown.renderButton(graphics, mouseX, mouseY);
         enchantmentDropdown.renderMenu(graphics, mouseX, mouseY);
@@ -152,7 +176,7 @@ public class TradeSelectorScreen extends Screen {
         }
 
         if (keyCode == 257 || keyCode == 335) {
-            saveConfiguration();
+            saveConfiguration(false);
             return true;
         }
 
@@ -190,7 +214,7 @@ public class TradeSelectorScreen extends Screen {
         maxLevelField.active = mode == ModConfig.LevelMode.RANGE;
     }
 
-    private void saveConfiguration() {
+    private void saveConfiguration(boolean closeAfterSave) {
         try {
             ModConfig currentConfig = ConfigManager.getConfig();
             ModConfig.TargetTradeConfig target = new ModConfig.TargetTradeConfig();
@@ -205,6 +229,7 @@ public class TradeSelectorScreen extends Screen {
             ModConfig.SettingsConfig settings = new ModConfig.SettingsConfig();
             settings.successSound = successSoundDropdown.getValue();
             settings.playSoundOnSuccess = settings.successSound != ModConfig.SuccessSound.NONE;
+            settings.enableLecternRecoveryWalk = lecternRecoveryWalkButton.getValue();
 
             ConfigManager.updateConfig(new ModConfig(target, currentConfig.boundVillager, currentConfig.boundJobBlock, settings));
             exactLevelField.setValue(String.valueOf(target.exactLevel));
@@ -214,11 +239,15 @@ public class TradeSelectorScreen extends Screen {
             updateLevelFieldsVisibility();
 
             if (minecraft != null && minecraft.player != null) {
-                minecraft.player.displayClientMessage(Component.literal("Trade Selector config saved"), false);
+                PlayerMessages.send(minecraft.player, "Trade Selector config saved");
+            }
+
+            if (closeAfterSave) {
+                onClose();
             }
         } catch (NumberFormatException e) {
             if (minecraft != null && minecraft.player != null) {
-                minecraft.player.displayClientMessage(Component.literal("Invalid number in config"), false);
+                PlayerMessages.send(minecraft.player, "Invalid number in config");
             }
         }
     }
@@ -292,6 +321,57 @@ public class TradeSelectorScreen extends Screen {
         };
     }
 
+    private void renderEditBoxBackground(
+            GuiGraphics graphics,
+            EditBox editBox,
+            int mouseX,
+            int mouseY,
+            int normalFillColor,
+            int hoverFillColor,
+            int normalOutlineColor,
+            int hoverOutlineColor
+    ) {
+        if (!editBox.isVisible()) return;
+        int x = editBox.getX();
+        int y = editBox.getY();
+        int w = editBox.getWidth();
+        int h = editBox.getHeight();
+        boolean hovered = contains(mouseX, mouseY, x, y, w, h);
+        int fillColor = hovered ? hoverFillColor : normalFillColor;
+        int outlineColor = hovered ? hoverOutlineColor : normalOutlineColor;
+        // Fill background
+        graphics.fill(x - 1, y - 1, x + w + 1, y + h + 1, fillColor);
+        // Draw black frame
+        graphics.renderOutline(x - 1, y - 1, w + 2, h + 2, outlineColor);
+    }
+
+    private void renderButtonBackground(
+            GuiGraphics graphics,
+            AbstractWidget widget,
+            int normalFillColor,
+            int hoverFillColor,
+            int normalOutlineColor,
+            int hoverOutlineColor,
+            boolean suppressHover
+    ) {
+        if (!widget.visible) return;
+        int x = widget.getX();
+        int y = widget.getY();
+        int w = widget.getWidth();
+        int h = widget.getHeight();
+        boolean hovered = !suppressHover && widget.isHoveredOrFocused();
+        int fillColor = hovered ? hoverFillColor : normalFillColor;
+        int outlineColor = hovered ? hoverOutlineColor : normalOutlineColor;
+        // Fill background
+        graphics.fill(x, y, x + w, y + h, fillColor);
+        // Draw black frame
+        graphics.renderOutline(x, y, w, h, outlineColor);
+    }
+
+    private boolean contains(int mouseX, int mouseY, int left, int top, int boxWidth, int boxHeight) {
+        return mouseX >= left && mouseX < left + boxWidth && mouseY >= top && mouseY < top + boxHeight;
+    }
+
     private static class Dropdown<T> {
         private static final int OPTION_HEIGHT = 18;
         private static final int MAX_VISIBLE_OPTIONS = 8;
@@ -328,6 +408,10 @@ public class TradeSelectorScreen extends Screen {
 
         void close() {
             open = false;
+        }
+
+        boolean isOpen() {
+            return open;
         }
 
         void renderButton(GuiGraphics graphics, int mouseX, int mouseY) {

@@ -34,23 +34,24 @@ public class ConfigManager {
         try {
             if (Files.exists(CONFIG_PATH)) {
                 String content = Files.readString(CONFIG_PATH);
-                config = GSON.fromJson(content, ModConfig.class);
-                if (config == null) {
+                ModConfig loaded = GSON.fromJson(content, ModConfig.class);
+                if (loaded == null) {
                     LOGGER.warn("Config was null after loading, creating default");
-                    config = new ModConfig();
+                    loaded = new ModConfig();
                 }
+                config = ModConfig.sanitize(loaded);
                 LOGGER.info("Configuration loaded successfully");
             } else {
                 LOGGER.info("No config file found, creating default");
-                config = new ModConfig();
+                config = ModConfig.sanitize(new ModConfig());
                 saveConfig();
             }
         } catch (IOException e) {
             LOGGER.error("Failed to load config: " + e.getMessage());
-            config = new ModConfig();
+            config = ModConfig.sanitize(new ModConfig());
         } catch (Exception e) {
             LOGGER.error("Error parsing config: " + e.getMessage());
-            config = new ModConfig();
+            config = ModConfig.sanitize(new ModConfig());
         }
     }
     
@@ -59,6 +60,7 @@ public class ConfigManager {
      */
     public static void saveConfig() {
         try {
+            config = ModConfig.sanitize(config);
             Files.createDirectories(CONFIG_PATH.getParent());
             String json = GSON.toJson(config);
             Files.writeString(CONFIG_PATH, json);
@@ -79,7 +81,7 @@ public class ConfigManager {
      * Updates the configuration and saves to disk
      */
     public static void updateConfig(ModConfig newConfig) {
-        config = newConfig;
+        config = ModConfig.sanitize(newConfig);
         saveConfig();
     }
     

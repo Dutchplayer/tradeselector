@@ -6,11 +6,11 @@ import dutchplayer.tradeselector.automation.VillagerBinder;
 import dutchplayer.tradeselector.gui.TradeSelectorScreen;
 import dutchplayer.tradeselector.input.KeybindHandler;
 import dutchplayer.tradeselector.util.ModState;
+import dutchplayer.tradeselector.util.PlayerMessages;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
 import net.minecraft.client.Minecraft;
-import net.minecraft.network.chat.Component;
 
 public class TradeRerollModClient implements ClientModInitializer {
     private static ModState modState;
@@ -49,7 +49,7 @@ public class TradeRerollModClient implements ClientModInitializer {
         }
 
         if (modState.isRunning()) {
-            client.player.displayClientMessage(Component.literal("Cannot open GUI while automation is running"), false);
+            PlayerMessages.send(client.player, "Cannot open GUI while automation is running");
             return;
         }
 
@@ -60,16 +60,12 @@ public class TradeRerollModClient implements ClientModInitializer {
         Minecraft client = Minecraft.getInstance();
         if (modState.isRunning()) {
             if (client.player != null) {
-                client.player.displayClientMessage(Component.literal("Automation is already running"), false);
+                PlayerMessages.send(client.player, "Automation is already running");
             }
             return false;
         }
 
-        boolean started = stateMachine.start();
-        if (!started && client.player != null) {
-            client.player.displayClientMessage(Component.literal(modState.getErrorMessage()), false);
-        }
-        return started;
+        return stateMachine.start();
     }
 
     public static void stopAutomation() {
@@ -80,7 +76,7 @@ public class TradeRerollModClient implements ClientModInitializer {
         stateMachine.stop();
         Minecraft client = Minecraft.getInstance();
         if (client.player != null) {
-            client.player.displayClientMessage(Component.literal("Automation stopped"), false);
+            PlayerMessages.send(client.player, "Automation stopped");
         }
     }
 

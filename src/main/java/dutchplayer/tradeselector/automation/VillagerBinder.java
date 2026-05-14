@@ -2,10 +2,10 @@ package dutchplayer.tradeselector.automation;
 
 import dutchplayer.tradeselector.config.ConfigManager;
 import dutchplayer.tradeselector.config.ModConfig;
+import dutchplayer.tradeselector.util.PlayerMessages;
 import dutchplayer.tradeselector.util.Position;
 import net.minecraft.client.Minecraft;
 import net.minecraft.core.BlockPos;
-import net.minecraft.network.chat.Component;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.npc.Villager;
 import net.minecraft.world.entity.npc.VillagerProfession;
@@ -16,13 +16,17 @@ import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.EntityHitResult;
 import net.minecraft.world.phys.HitResult;
+import net.minecraft.world.phys.Vec3;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.Comparator;
 import java.util.UUID;
 
 public class VillagerBinder {
     private static final Logger LOGGER = LoggerFactory.getLogger("TradeSelector");
+    private static final double LOOK_FALLBACK_MAX_DISTANCE_BLOCKS = 3.0;
+    private static final double LOOK_FALLBACK_MIN_ALIGNMENT = 0.25;
     private final Minecraft client;
 
     public VillagerBinder() {
@@ -36,18 +40,18 @@ public class VillagerBinder {
 
         HitResult hit = client.hitResult;
         if (!(hit instanceof EntityHitResult entityHit)) {
-            client.player.displayClientMessage(Component.literal("Look at a librarian villager first"), false);
+            PlayerMessages.send(client.player, "Look at a librarian villager first");
             return false;
         }
 
         Entity entity = entityHit.getEntity();
         if (!(entity instanceof Villager villager)) {
-            client.player.displayClientMessage(Component.literal("Look at a villager first"), false);
+            PlayerMessages.send(client.player, "Look at a villager first");
             return false;
         }
 
         if (villager.getVillagerData().getProfession() != VillagerProfession.LIBRARIAN) {
-            client.player.displayClientMessage(Component.literal("That villager is not a librarian"), false);
+            PlayerMessages.send(client.player, "That villager is not a librarian");
             return false;
         }
 
@@ -61,7 +65,7 @@ public class VillagerBinder {
         );
 
         ConfigManager.updateConfig(newConfig);
-        client.player.displayClientMessage(Component.literal("Bound librarian at " + position), false);
+        PlayerMessages.send(client.player, "Bound librarian at " + position);
         LOGGER.info("Bound villager at {}", position);
         return true;
     }
@@ -73,14 +77,14 @@ public class VillagerBinder {
 
         HitResult hit = client.hitResult;
         if (!(hit instanceof BlockHitResult blockHit)) {
-            client.player.displayClientMessage(Component.literal("Look at a lectern first"), false);
+            PlayerMessages.send(client.player, "Look at a lectern first");
             return false;
         }
 
         BlockPos blockPos = blockHit.getBlockPos();
         BlockState blockState = client.level.getBlockState(blockPos);
         if (!blockState.is(Blocks.LECTERN)) {
-            client.player.displayClientMessage(Component.literal("The selected block is not a lectern"), false);
+            PlayerMessages.send(client.player, "The selected block is not a lectern");
             return false;
         }
 
@@ -94,7 +98,7 @@ public class VillagerBinder {
         );
 
         ConfigManager.updateConfig(newConfig);
-        client.player.displayClientMessage(Component.literal("Bound lectern at " + position), false);
+        PlayerMessages.send(client.player, "Bound lectern at " + position);
         LOGGER.info("Bound lectern at {}", position);
         return true;
     }
@@ -114,7 +118,7 @@ public class VillagerBinder {
 
     public Villager getBoundVillager() {
         ModConfig config = ConfigManager.getConfig();
-        if (!config.boundVillager.isBound() || client.level == null) {
+        if (!config.boundVillager.isBound() || client.level == null || client.player == null) {
             return null;
         }
 
@@ -123,15 +127,35 @@ public class VillagerBinder {
             return villagerByUuid;
         }
 
-        BlockPos blockPos = config.boundVillager.position.toBlockPos();
-        AABB searchBox = new AABB(blockPos).inflate(3.0);
+        return getFallbackVillagerInLookDirection();
+    }
+
+    private Villager getFallbackVillagerInLookDirection() {
+        if (client.level == null || client.player == null) {
+            return null;
+        }
+
+        Vec3 eyePosition = client.player.getEyePosition();
+        Vec3 lookDirection = client.player.getLookAngle().normalize();
+        AABB searchBox = client.player.getBoundingBox().inflate(LOOK_FALLBACK_MAX_DISTANCE_BLOCKS);
+
         return client.level.getEntities(
                         EntityTypeTest.forClass(Villager.class),
                         searchBox,
                         villager -> villager.getVillagerData().getProfession() == VillagerProfession.LIBRARIAN
                 )
                 .stream()
-                .findFirst()
+                .filter(villager -> {
+                    Vec3 toVillager = villager.getEyePosition().subtract(eyePosition);
+                    double distance = toVillager.length();
+                    if (distance <= 1.0E-6 || distance > LOOK_FALLBACK_MAX_DISTANCE_BLOCKS) {
+                        return false;
+                    }
+
+                    double alignment = lookDirection.dot(toVillager.normalize());
+                    return alignment >= LOOK_FALLBACK_MIN_ALIGNMENT;
+                })
+                .min(Comparator.comparingDouble(villager -> villager.distanceToSqr(client.player)))
                 .orElse(null);
     }
 
