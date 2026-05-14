@@ -1,366 +1,437 @@
 package dutchplayer.tradeselector.gui;
 
-
-import dutchplayer.tradeselector.automation.VillagerBinder;
+import dutchplayer.tradeselector.automation.TradeScanner;
 import dutchplayer.tradeselector.config.ConfigManager;
 import dutchplayer.tradeselector.config.ModConfig;
-import dutchplayer.tradeselector.util.ModState;
+import net.minecraft.client.gui.Font;
+import net.minecraft.client.gui.GuiGraphics;
+import net.minecraft.client.gui.components.Button;
+import net.minecraft.client.gui.components.CycleButton;
+import net.minecraft.client.gui.components.EditBox;
 import net.minecraft.client.gui.screens.Screen;
-import org.w3c.dom.Text;
+import net.minecraft.network.chat.Component;
 
-import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
+import java.util.function.Consumer;
+import java.util.function.Function;
 
-/**
- * Main GUI screen for configuring and controlling the trade automation
- */
 public class TradeSelectorScreen extends Screen {
-    private static final int PANEL_WIDTH = 300;
-    private static final int PANEL_HEIGHT = 400;
-    
-    // Configuration widgets
-    private CyclingButtonWidget<String> enchantmentButton;
-    private CyclingButtonWidget<ModConfig.LevelMode> levelModeButton;
-    private TextFieldWidget exactLevelField;
-    private TextFieldWidget minLevelField;
-    private TextFieldWidget maxLevelField;
-    private TextFieldWidget maxPriceField;
-    private CyclingButtonWidget<Boolean> soundToggle;
-    
-    // Control buttons
-    private ButtonWidget bindVillagerButton;
-    private ButtonWidget bindJobBlockButton;
-    private ButtonWidget startButton;
-    private ButtonWidget stopButton;
-    private ButtonWidget saveButton;
-    
-    // Status display
-    private List<Text> statusLines = new ArrayList<>();
-    
-    private final VillagerBinder villagerBinder;
-    private final ModState modState;
-    
-    public TradeSelectorScreen(VillagerBinder villagerBinder, ModState modState) {
-        super(Text.literal("Trade Selector"));
-        this.villagerBinder = villagerBinder;
-        this.modState = modState;
+    private static final int PANEL_WIDTH = 330;
+    private static final int PANEL_HEIGHT = 270;
+
+    private Dropdown<String> enchantmentDropdown;
+    private CycleButton<ModConfig.LevelMode> levelModeButton;
+    private Dropdown<ModConfig.SuccessSound> successSoundDropdown;
+    private EditBox exactLevelField;
+    private EditBox minLevelField;
+    private EditBox maxLevelField;
+    private EditBox maxPriceField;
+
+    private final TradeScanner tradeScanner = new TradeScanner();
+
+    public TradeSelectorScreen() {
+        super(Component.literal("Trade Selector"));
     }
-    
+
     @Override
     protected void init() {
-        super.init();
-        
-        int centerX = this.width / 2;
-        int centerY = this.height / 2;
-        int panelX = centerX - PANEL_WIDTH / 2;
-        int panelY = centerY - PANEL_HEIGHT / 2;
-        
-        // Enchantment selector
-        enchantmentButton = CyclingButtonWidget.builder(ModConfig::getEnchantmentDisplayName)
-                .values(getAvailableEnchantments())
-                .initially(ConfigManager.getConfig().targetTrade.enchantment)
-                .build(panelX + 10, panelY + 20, 200, 20, 
-                    Text.literal("Enchantment"), (button, value) -> {});
-        
-        // Level mode selector
-        levelModeButton = CyclingButtonWidget.<ModConfig.LevelMode>builder(mode -> 
-                Text.literal(mode.toString()))
-                .values(ModConfig.LevelMode.values())
-                .initially(ConfigManager.getConfig().targetTrade.levelMode)
-                .build(panelX + 10, panelY + 50, 200, 20,
-                    Text.literal("Level Mode"), (button, value) -> {
-                        updateLevelFieldsVisibility();
-                    });
-        
-        // Level input fields
-        exactLevelField = new TextFieldWidget(this.textRenderer, panelX + 10, panelY + 80, 60, 20, 
-            Text.literal("Exact Level"));
-        exactLevelField.setText(String.valueOf(ConfigManager.getConfig().targetTrade.exactLevel));
-        exactLevelField.setMaxLength(2);
-        
-        minLevelField = new TextFieldWidget(this.textRenderer, panelX + 10, panelY + 80, 60, 20,
-            Text.literal("Min Level"));
-        minLevelField.setText(String.valueOf(ConfigManager.getConfig().targetTrade.minimumLevel));
-        minLevelField.setMaxLength(2);
-        
-        maxLevelField = new TextFieldWidget(this.textRenderer, panelX + 80, panelY + 80, 60, 20,
-            Text.literal("Max Level"));
-        maxLevelField.setText(String.valueOf(ConfigManager.getConfig().targetTrade.maximumLevel));
-        maxLevelField.setMaxLength(2);
-        
-        // Maximum price field
-        maxPriceField = new TextFieldWidget(this.textRenderer, panelX + 10, panelY + 110, 60, 20,
-            Text.literal("Max Price"));
-        maxPriceField.setText(String.valueOf(ConfigManager.getConfig().targetTrade.maximumPrice));
-        maxPriceField.setMaxLength(3);
-        
-        // Sound toggle
-        soundToggle = CyclingButtonWidget.onOffBuilder(ConfigManager.getConfig().settings.playSoundOnSuccess)
-                .build(panelX + 10, panelY + 140, 100, 20,
-                    Text.literal("Sound on Success"), (button, value) -> {});
-        
-        // Control buttons
-        bindVillagerButton = ButtonWidget.builder(Text.literal("Bind Villager"), button -> {
-                    villagerBinder.bindVillager();
-                    updateStatus();
-                })
-                .dimensions(panelX + 10, panelY + 180, 140, 20)
-                .build();
-        
-        bindJobBlockButton = ButtonWidget.builder(Text.literal("Bind Lectern"), button -> {
-                    villagerBinder.bindJobBlock();
-                    updateStatus();
-                })
-                .dimensions(panelX + 160, panelY + 180, 130, 20)
-                .build();
-        
-        startButton = ButtonWidget.builder(Text.literal("Start Automation"), button -> {
-                    if (TradeRerollModClient.startAutomation()) {
-                        updateStatus();
-                    }
-                })
-                .dimensions(panelX + 10, panelY + 210, 140, 20)
-                .build();
-        
-        stopButton = ButtonWidget.builder(Text.literal("Stop"), button -> {
-                    TradeRerollModClient.stopAutomation();
-                    updateStatus();
-                })
-                .dimensions(panelX + 160, panelY + 210, 130, 20)
-                .build();
-        
-        saveButton = ButtonWidget.builder(Text.literal("Save Config"), button -> {
-                    saveConfiguration();
-                })
-                .dimensions(panelX + 10, panelY + 240, 280, 20)
-                .build();
-        
-        // Add all widgets
-        addDrawableChild(enchantmentButton);
-        addDrawableChild(levelModeButton);
-        addDrawableChild(exactLevelField);
-        addDrawableChild(minLevelField);
-        addDrawableChild(maxLevelField);
-        addDrawableChild(maxPriceField);
-        addDrawableChild(soundToggle);
-        addDrawableChild(bindVillagerButton);
-        addDrawableChild(bindJobBlockButton);
-        addDrawableChild(startButton);
-        addDrawableChild(stopButton);
-        addDrawableChild(saveButton);
-        
-        // Set initial visibility
+        int panelX = (this.width - PANEL_WIDTH) / 2;
+        int panelY = (this.height - PANEL_HEIGHT) / 2;
+        ModConfig config = ConfigManager.getConfig();
+
+        List<String> enchantments = Arrays.asList(getAvailableEnchantments());
+        String initialEnchant = enchantments.contains(config.targetTrade.enchantment)
+                ? config.targetTrade.enchantment
+                : "minecraft:mending";
+
+        enchantmentDropdown = new Dropdown<>(
+                this.font,
+                panelX + 120,
+                panelY + 32,
+                190,
+                20,
+                enchantments,
+                initialEnchant,
+                this::displayName,
+                value -> {
+                    clampLevelFieldsToSelectedEnchantment();
+                    updateLevelFieldsVisibility();
+                }
+        );
+
+        levelModeButton = CycleButton.builder((ModConfig.LevelMode mode) -> Component.literal(mode.name()))
+                .withValues(ModConfig.LevelMode.values())
+                .withInitialValue(config.targetTrade.levelMode)
+                .create(panelX + 120, panelY + 62, 120, 20, Component.literal("Level"), (button, value) -> updateLevelFieldsVisibility());
+
+        exactLevelField = numberField(panelX + 120, panelY + 92, 46, "Exact", config.targetTrade.exactLevel, 2);
+        minLevelField = numberField(panelX + 120, panelY + 92, 46, "Min", config.targetTrade.minimumLevel, 2);
+        maxLevelField = numberField(panelX + 174, panelY + 92, 46, "Max", config.targetTrade.maximumLevel, 2);
+        maxPriceField = numberField(panelX + 120, panelY + 122, 46, "Max Price", config.targetTrade.maximumPrice, 3);
+        setLevelFieldFilters();
+
+        successSoundDropdown = new Dropdown<>(
+                this.font,
+                panelX + 120,
+                panelY + 152,
+                190,
+                20,
+                Arrays.asList(ModConfig.SuccessSound.values()),
+                config.settings.getSuccessSound(),
+                ModConfig.SuccessSound::getDisplayName,
+                value -> {}
+        );
+
+        addRenderableWidget(levelModeButton);
+        addRenderableWidget(exactLevelField);
+        addRenderableWidget(minLevelField);
+        addRenderableWidget(maxLevelField);
+        addRenderableWidget(maxPriceField);
+
+        addRenderableWidget(Button.builder(Component.literal("Save Config"), button -> saveConfiguration())
+                .bounds(panelX + 20, panelY + 204, 290, 20)
+                .build());
+
         updateLevelFieldsVisibility();
-        updateStatus();
+        clampLevelFieldsToSelectedEnchantment();
     }
 
     @Override
-    public void render(DrawContext context, int mouseX, int mouseY, float delta) {
-        this.renderBackground(context, mouseX, mouseY, delta);
-        
-        int centerX = this.width / 2;
-        int centerY = this.height / 2;
-        int panelX = centerX - PANEL_WIDTH / 2;
-        int panelY = centerY - PANEL_HEIGHT / 2;
-        
-        // Draw panel background
-        context.fill(panelX, panelY, panelX + PANEL_WIDTH, panelY + PANEL_HEIGHT, 
-                    0xFF1E1E1E);
-        context.drawHorizontalLine(panelX, panelX + PANEL_WIDTH - 1, panelY, 0xFFFFFFFF);
-        context.drawHorizontalLine(panelX, panelX + PANEL_WIDTH - 1, panelY + PANEL_HEIGHT - 1, 0xFFFFFFFF);
-        context.drawVerticalLine(panelX, panelY, panelY + PANEL_HEIGHT - 1, 0xFFFFFFFF);
-        context.drawVerticalLine(panelX + PANEL_WIDTH - 1, panelY, panelY + PANEL_HEIGHT - 1, 0xFFFFFFFF);
-        
-        // Draw title
-        context.drawText(this.textRenderer, this.title, 
-                         panelX + PANEL_WIDTH / 2 - this.textRenderer.getWidth(this.title) / 2, 
-                         panelY + 5, 0xFFFFFF, false);
-        
-        // Draw labels
-        context.drawText(this.textRenderer, Text.literal("Enchantment:"), 
-                         panelX + 220, panelY + 25, 0xAAAAAA, false);
-        context.drawText(this.textRenderer, Text.literal("Level Mode:"), 
-                         panelX + 220, panelY + 55, 0xAAAAAA, false);
-        context.drawText(this.textRenderer, Text.literal("Level:"), 
-                         panelX + 150, panelY + 85, 0xAAAAAA, false);
-        context.drawText(this.textRenderer, Text.literal("Max Price:"), 
-                         panelX + 80, panelY + 115, 0xAAAAAA, false);
-        
-        // Draw status
-        int statusY = panelY + 280;
-        for (Text line : statusLines) {
-            context.drawText(this.textRenderer, line, panelX + 10, statusY, 0xFFFFFF, false);
-            statusY += 12;
-        }
-        
-        super.render(context, mouseX, mouseY, delta);
+    public void render(GuiGraphics graphics, int mouseX, int mouseY, float delta) {
+        int panelX = (this.width - PANEL_WIDTH) / 2;
+        int panelY = (this.height - PANEL_HEIGHT) / 2;
+        graphics.fill(panelX, panelY, panelX + PANEL_WIDTH, panelY + PANEL_HEIGHT, 0xFF202020);
+        graphics.renderOutline(panelX, panelY, PANEL_WIDTH, PANEL_HEIGHT, 0xFF707070);
+
+        graphics.drawCenteredString(this.font, this.title, this.width / 2, panelY + 10, 0xFFFFFF);
+        graphics.drawString(this.font, "Enchantment", panelX + 20, panelY + 38, 0xCCCCCC, false);
+        graphics.drawString(this.font, "Level Mode", panelX + 20, panelY + 68, 0xCCCCCC, false);
+        graphics.drawString(this.font, "Level (max " + selectedEnchantmentMaxLevel() + ")", panelX + 20, panelY + 98, 0xCCCCCC, false);
+        graphics.drawString(this.font, "Max Price", panelX + 20, panelY + 128, 0xCCCCCC, false);
+        graphics.drawString(this.font, "Success Sound", panelX + 20, panelY + 158, 0xCCCCCC, false);
+
+        super.render(graphics, mouseX, mouseY, delta);
+        enchantmentDropdown.renderButton(graphics, mouseX, mouseY);
+        successSoundDropdown.renderButton(graphics, mouseX, mouseY);
+        enchantmentDropdown.renderMenu(graphics, mouseX, mouseY);
+        successSoundDropdown.renderMenu(graphics, mouseX, mouseY);
     }
-    
+
     @Override
-    public boolean keyPressed(int keyCode, int scanCode, int modifiers) {
-        if (keyCode == GLFW.GLFW_KEY_ESCAPE) {
-            this.close();
+    public boolean mouseClicked(double mouseX, double mouseY, int button) {
+        if (enchantmentDropdown.mouseClicked(mouseX, mouseY, button)) {
+            successSoundDropdown.close();
             return true;
         }
-        
-        // Handle Enter key in text fields
-        if (keyCode == GLFW.GLFW_KEY_ENTER) {
-            if (exactLevelField.isActive() || minLevelField.isActive() || 
-                maxLevelField.isActive() || maxPriceField.isActive()) {
-                saveConfiguration();
-                return true;
-            }
+        if (successSoundDropdown.mouseClicked(mouseX, mouseY, button)) {
+            enchantmentDropdown.close();
+            return true;
         }
-        
-        return super.keyPressed(keyCode, scanCode, modifiers);
+
+        enchantmentDropdown.close();
+        successSoundDropdown.close();
+        return super.mouseClicked(mouseX, mouseY, button);
     }
-    
+
+    @Override
+    public boolean mouseScrolled(double mouseX, double mouseY, double horizontalAmount, double verticalAmount) {
+        if (enchantmentDropdown.mouseScrolled(mouseX, mouseY, verticalAmount)) {
+            return true;
+        }
+        if (successSoundDropdown.mouseScrolled(mouseX, mouseY, verticalAmount)) {
+            return true;
+        }
+        return super.mouseScrolled(mouseX, mouseY, horizontalAmount, verticalAmount);
+    }
+
+    @Override
+    public boolean keyPressed(int keyCode, int scanCode, int modifiers) {
+        if (super.keyPressed(keyCode, scanCode, modifiers)) {
+            return true;
+        }
+
+        if (keyCode == 257 || keyCode == 335) {
+            saveConfiguration();
+            return true;
+        }
+
+        return false;
+    }
+
     @Override
     public void tick() {
-        super.tick();
-        exactLevelField.tick();
-        minLevelField.tick();
-        maxLevelField.tick();
-        maxPriceField.tick();
-        
-        // Update status periodically
-        if (this.client != null && this.client.world != null && 
-            this.client.world.getTime() % 20 == 0) {
-            updateStatus();
-        }
     }
-    
+
+    @Override
+    public boolean isPauseScreen() {
+        return false;
+    }
+
+    private EditBox numberField(int x, int y, int width, String label, int value, int maxLength) {
+        EditBox field = new EditBox(this.font, x, y, width, 20, Component.literal(label));
+        field.setValue(String.valueOf(value));
+        field.setMaxLength(maxLength);
+        field.setFilter(text -> text.isEmpty() || text.matches("\\d+"));
+        return field;
+    }
+
     private void updateLevelFieldsVisibility() {
+        if (selectedEnchantmentMaxLevel() <= 1 && levelModeButton.getValue() == ModConfig.LevelMode.RANGE) {
+            levelModeButton.setValue(ModConfig.LevelMode.EXACT);
+        }
+
         ModConfig.LevelMode mode = levelModeButton.getValue();
-        
-        boolean showExact = mode == ModConfig.LevelMode.EXACT;
-        boolean showRange = mode == ModConfig.LevelMode.RANGE;
-        
-        exactLevelField.setVisible(showExact);
-        exactLevelField.active = showExact;
-        
-        minLevelField.setVisible(showRange);
-        minLevelField.active = showRange;
-        
-        maxLevelField.setVisible(showRange);
-        maxLevelField.active = showRange;
+        exactLevelField.setVisible(mode == ModConfig.LevelMode.EXACT);
+        exactLevelField.active = mode == ModConfig.LevelMode.EXACT;
+        minLevelField.setVisible(mode == ModConfig.LevelMode.RANGE);
+        minLevelField.active = mode == ModConfig.LevelMode.RANGE;
+        maxLevelField.setVisible(mode == ModConfig.LevelMode.RANGE);
+        maxLevelField.active = mode == ModConfig.LevelMode.RANGE;
     }
-    
+
     private void saveConfiguration() {
         try {
             ModConfig currentConfig = ConfigManager.getConfig();
-            
-            // Create new config with updated values
-            ModConfig.TargetTradeConfig newTargetTrade = new ModConfig.TargetTradeConfig();
-            newTargetTrade.enchantment = enchantmentButton.getValue();
-            newTargetTrade.levelMode = levelModeButton.getValue();
-            newTargetTrade.exactLevel = Integer.parseInt(exactLevelField.getText());
-            newTargetTrade.minimumLevel = Integer.parseInt(minLevelField.getText());
-            newTargetTrade.maximumLevel = Integer.parseInt(maxLevelField.getText());
-            newTargetTrade.maximumPrice = Integer.parseInt(maxPriceField.getText());
-            
-            ModConfig.SettingsConfig newSettings = new ModConfig.SettingsConfig();
-            newSettings.playSoundOnSuccess = soundToggle.getValue();
-            
-            ModConfig newConfig = new ModConfig(
-                newTargetTrade,
-                currentConfig.boundVillager,
-                currentConfig.boundJobBlock,
-                newSettings
-            );
-            
-            ConfigManager.updateConfig(newConfig);
-            
-            if (this.client != null && this.client.player != null) {
-                this.client.player.sendMessage(
-                    Text.literal("§aConfiguration saved!"), false);
+            ModConfig.TargetTradeConfig target = new ModConfig.TargetTradeConfig();
+            target.enchantment = enchantmentDropdown.getValue();
+            int enchantmentMaxLevel = selectedEnchantmentMaxLevel();
+            target.levelMode = normalizedLevelMode(levelModeButton.getValue(), enchantmentMaxLevel);
+            target.exactLevel = clamp(parseNumber(exactLevelField, currentConfig.targetTrade.exactLevel), 1, enchantmentMaxLevel);
+            target.minimumLevel = clamp(parseNumber(minLevelField, currentConfig.targetTrade.minimumLevel), 1, enchantmentMaxLevel);
+            target.maximumLevel = clamp(parseNumber(maxLevelField, currentConfig.targetTrade.maximumLevel), target.minimumLevel, enchantmentMaxLevel);
+            target.maximumPrice = parseNumber(maxPriceField, currentConfig.targetTrade.maximumPrice);
+
+            ModConfig.SettingsConfig settings = new ModConfig.SettingsConfig();
+            settings.successSound = successSoundDropdown.getValue();
+            settings.playSoundOnSuccess = settings.successSound != ModConfig.SuccessSound.NONE;
+
+            ConfigManager.updateConfig(new ModConfig(target, currentConfig.boundVillager, currentConfig.boundJobBlock, settings));
+            exactLevelField.setValue(String.valueOf(target.exactLevel));
+            minLevelField.setValue(String.valueOf(target.minimumLevel));
+            maxLevelField.setValue(String.valueOf(target.maximumLevel));
+            levelModeButton.setValue(target.levelMode);
+            updateLevelFieldsVisibility();
+
+            if (minecraft != null && minecraft.player != null) {
+                minecraft.player.displayClientMessage(Component.literal("Trade Selector config saved"), false);
             }
-            
         } catch (NumberFormatException e) {
-            if (this.client != null && this.client.player != null) {
-                this.client.player.sendMessage(
-                    Text.literal("§cInvalid number in configuration!"), false);
+            if (minecraft != null && minecraft.player != null) {
+                minecraft.player.displayClientMessage(Component.literal("Invalid number in config"), false);
             }
         }
     }
-    
-    private void updateStatus() {
-        statusLines.clear();
-        
-        ModConfig config = ConfigManager.getConfig();
-        
-        // Automation status
-        statusLines.add(Text.literal("§6Status: " + modState.getCurrentState().getDisplayName()));
-        
-        if (modState.isRunning()) {
-            statusLines.add(Text.literal("§7Attempts: " + modState.getAttemptCount()));
-            statusLines.add(Text.literal("§7Elapsed: " + modState.getElapsedSeconds() + "s"));
-        }
-        
-        if (modState.hasError()) {
-            statusLines.add(Text.literal("§cError: " + modState.getErrorMessage()));
-        }
-        
-        // Binding status
-        if (config.boundVillager.isBound()) {
-            statusLines.add(Text.literal("§aVillager: " + config.boundVillager.position));
-        } else {
-            statusLines.add(Text.literal("§cVillager: Not bound"));
-        }
-        
-        if (config.boundJobBlock.isBound()) {
-            statusLines.add(Text.literal("§aLectern: " + config.boundJobBlock.position));
-        } else {
-            statusLines.add(Text.literal("§cLectern: Not bound"));
-        }
-        
-        // Validation status
-        boolean villagerValid = villagerBinder.validateVillager();
-        boolean jobBlockValid = villagerBinder.validateJobBlock();
-        
-        if (config.boundVillager.isBound()) {
-            statusLines.add(Text.literal(villagerValid ? "§aVillager valid" : "§cVillager missing"));
-        }
-        
-        if (config.boundJobBlock.isBound()) {
-            statusLines.add(Text.literal(jobBlockValid ? "§aLectern valid" : "§cLectern missing"));
-        }
+
+    private int parseNumber(EditBox field, int fallback) {
+        String value = field.getValue();
+        return value == null || value.isBlank() ? fallback : Integer.parseInt(value);
     }
-    
+
+    private void clampLevelFieldsToSelectedEnchantment() {
+        int maxLevel = selectedEnchantmentMaxLevel();
+        exactLevelField.setValue(String.valueOf(clamp(parseNumber(exactLevelField, 1), 1, maxLevel)));
+        minLevelField.setValue(String.valueOf(clamp(parseNumber(minLevelField, 1), 1, maxLevel)));
+        maxLevelField.setValue(String.valueOf(clamp(parseNumber(maxLevelField, maxLevel), parseNumber(minLevelField, 1), maxLevel)));
+    }
+
+    private void setLevelFieldFilters() {
+        exactLevelField.setFilter(this::isValidLevelText);
+        minLevelField.setFilter(this::isValidLevelText);
+        maxLevelField.setFilter(this::isValidLevelText);
+    }
+
+    private boolean isValidLevelText(String text) {
+        if (text == null || text.isEmpty()) {
+            return true;
+        }
+        if (!text.matches("\\d+")) {
+            return false;
+        }
+        int value = Integer.parseInt(text);
+        return value >= 1 && value <= selectedEnchantmentMaxLevel();
+    }
+
+    private ModConfig.LevelMode normalizedLevelMode(ModConfig.LevelMode mode, int maxLevel) {
+        if (maxLevel <= 1 && mode == ModConfig.LevelMode.RANGE) {
+            return ModConfig.LevelMode.EXACT;
+        }
+        return mode;
+    }
+
+    private int selectedEnchantmentMaxLevel() {
+        return Math.max(1, tradeScanner.getEnchantmentMaxLevel(enchantmentDropdown.getValue()));
+    }
+
+    private int clamp(int value, int min, int max) {
+        return Math.max(min, Math.min(max, value));
+    }
+
+    private String displayName(String enchantmentId) {
+        String displayName = tradeScanner.getEnchantmentDisplayName(enchantmentId);
+        return displayName.equals(enchantmentId) ? enchantmentId.replace("minecraft:", "") : displayName;
+    }
+
     private String[] getAvailableEnchantments() {
-        // Common enchantments that librarians can trade
+        String[] ids = tradeScanner.getAllEnchantmentIds();
+        if (ids.length > 1) {
+            return ids;
+        }
+
         return new String[] {
-            "minecraft:mending",
-            "minecraft:unbreaking", 
-            "minecraft:efficiency",
-            "minecraft:fortune",
-            "minecraft:silk_touch",
-            "minecraft:sharpness",
-            "minecraft:smite",
-            "minecraft:bane_of_arthropods",
-            "minecraft:protection",
-            "minecraft:fire_protection",
-            "minecraft:blast_protection",
-            "minecraft:projectile_protection",
-            "minecraft:feather_falling",
-            "minecraft:respiration",
-            "minecraft:aqua_affinity",
-            "minecraft:depth_strider",
-            "minecraft:frost_walker",
-            "minecraft:thorns",
-            "minecraft:binding_curse",
-            "minecraft:vanishing_curse",
-            "minecraft:punch",
-            "minecraft:flame",
-            "minecraft:infinity",
-            "minecraft:power",
-            "minecraft:loyalty",
-            "minecraft:impaling",
-            "minecraft:riptide",
-            "minecraft:channeling",
-            "minecraft:multishot",
-            "minecraft:quick_charge",
-            "minecraft:piercing"
+                "minecraft:mending",
+                "minecraft:unbreaking",
+                "minecraft:efficiency",
+                "minecraft:fortune",
+                "minecraft:silk_touch",
+                "minecraft:sharpness",
+                "minecraft:protection",
+                "minecraft:feather_falling",
+                "minecraft:power",
+                "minecraft:infinity"
         };
+    }
+
+    private static class Dropdown<T> {
+        private static final int OPTION_HEIGHT = 18;
+        private static final int MAX_VISIBLE_OPTIONS = 8;
+
+        private final Font font;
+        private final int x;
+        private final int y;
+        private final int width;
+        private final int height;
+        private final List<T> values;
+        private final Function<T, String> labeler;
+        private final Consumer<T> onChange;
+
+        private T value;
+        private boolean open;
+        private int scrollIndex;
+
+        Dropdown(Font font, int x, int y, int width, int height, List<T> values, T initialValue,
+                 Function<T, String> labeler, Consumer<T> onChange) {
+            this.font = font;
+            this.x = x;
+            this.y = y;
+            this.width = width;
+            this.height = height;
+            this.values = values;
+            this.value = initialValue;
+            this.labeler = labeler;
+            this.onChange = onChange;
+        }
+
+        T getValue() {
+            return value;
+        }
+
+        void close() {
+            open = false;
+        }
+
+        void renderButton(GuiGraphics graphics, int mouseX, int mouseY) {
+            boolean hovered = contains(mouseX, mouseY, x, y, width, height);
+            graphics.fill(x, y, x + width, y + height, hovered ? 0xFF454545 : 0xFF353535);
+            graphics.renderOutline(x, y, width, height, open ? 0xFFFFFFFF : 0xFF8A8A8A);
+            graphics.drawString(font, trim(labeler.apply(value), width - 24), x + 6, y + 6, 0xFFFFFF, false);
+            graphics.drawString(font, open ? "^" : "v", x + width - 14, y + 6, 0xFFFFFF, false);
+        }
+
+        void renderMenu(GuiGraphics graphics, int mouseX, int mouseY) {
+            if (!open) {
+                return;
+            }
+
+            graphics.flush();
+            graphics.pose().pushPose();
+            graphics.pose().translate(0.0f, 0.0f, 300.0f);
+            int visible = Math.min(MAX_VISIBLE_OPTIONS, values.size());
+            int listHeight = visible * OPTION_HEIGHT;
+            int listY = y + height + 1;
+            graphics.fill(x, listY, x + width, listY + listHeight, 0xFF242424);
+            graphics.renderOutline(x, listY, width, listHeight, 0xFFFFFFFF);
+            graphics.enableScissor(x, listY, x + width, listY + listHeight);
+            for (int row = 0; row < visible; row++) {
+                int index = scrollIndex + row;
+                if (index >= values.size()) {
+                    break;
+                }
+
+                int rowY = listY + row * OPTION_HEIGHT;
+                T option = values.get(index);
+                boolean rowHovered = contains(mouseX, mouseY, x, rowY, width, OPTION_HEIGHT);
+                if (rowHovered || option.equals(value)) {
+                    graphics.fill(x + 1, rowY + 1, x + width - 1, rowY + OPTION_HEIGHT - 1, rowHovered ? 0xFF555555 : 0xFF3C4E63);
+                }
+                graphics.drawString(font, trim(labeler.apply(option), width - 12), x + 6, rowY + 5, 0xFFFFFF, false);
+            }
+            graphics.disableScissor();
+            graphics.pose().popPose();
+            graphics.flush();
+        }
+
+        boolean mouseClicked(double mouseX, double mouseY, int button) {
+            if (button != 0) {
+                return false;
+            }
+
+            if (contains(mouseX, mouseY, x, y, width, height)) {
+                open = !open;
+                scrollSelectedIntoView();
+                return true;
+            }
+
+            if (!open) {
+                return false;
+            }
+
+            int visible = Math.min(MAX_VISIBLE_OPTIONS, values.size());
+            int listY = y + height + 1;
+            if (!contains(mouseX, mouseY, x, listY, width, visible * OPTION_HEIGHT)) {
+                open = false;
+                return false;
+            }
+
+            int row = ((int) mouseY - listY) / OPTION_HEIGHT;
+            int index = scrollIndex + row;
+            if (index >= 0 && index < values.size()) {
+                value = values.get(index);
+                onChange.accept(value);
+            }
+            open = false;
+            return true;
+        }
+
+        boolean mouseScrolled(double mouseX, double mouseY, double amount) {
+            if (!open || !contains(mouseX, mouseY, x, y, width, height + 1 + MAX_VISIBLE_OPTIONS * OPTION_HEIGHT)) {
+                return false;
+            }
+
+            int maxScroll = Math.max(0, values.size() - MAX_VISIBLE_OPTIONS);
+            scrollIndex = Math.max(0, Math.min(maxScroll, scrollIndex - (int) Math.signum(amount)));
+            return true;
+        }
+
+        private void scrollSelectedIntoView() {
+            int selectedIndex = values.indexOf(value);
+            if (selectedIndex < 0) {
+                return;
+            }
+
+            if (selectedIndex < scrollIndex) {
+                scrollIndex = selectedIndex;
+            } else if (selectedIndex >= scrollIndex + MAX_VISIBLE_OPTIONS) {
+                scrollIndex = selectedIndex - MAX_VISIBLE_OPTIONS + 1;
+            }
+        }
+
+        private String trim(String text, int maxWidth) {
+            return font.plainSubstrByWidth(text, maxWidth);
+        }
+
+        private boolean contains(double mouseX, double mouseY, int left, int top, int boxWidth, int boxHeight) {
+            return mouseX >= left && mouseX < left + boxWidth && mouseY >= top && mouseY < top + boxHeight;
+        }
     }
 }

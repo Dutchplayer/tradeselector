@@ -8,8 +8,7 @@
 		"DutchPlayer"
 	],
 	"contact": {
-		"homepage": "https://fabricmc.net/",
-		"sources": "https://github.com/FabricMC/fabric-example-mod"
+		"sources": "https://github.com/DutchPlayer/tradeselector"
 	},
 	"license": "CC0-1.0",
 	"icon": "assets/tradeselector/icon.png",
@@ -22,9 +21,6 @@
 			"dutchplayer.tradeselector.TradeRerollModClient"
 		]
 	},
-	"mixins": [
-		"tradeselector.mixins.json"
-	],
 	"depends": {
 		"fabricloader": ">=0.19.2",
 		"minecraft": "~1.21.1",

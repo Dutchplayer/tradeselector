@@ -2,6 +2,7 @@ package dutchplayer.tradeselector.util;
 
 
 import com.google.gson.annotations.SerializedName;
+import net.minecraft.core.BlockPos;
 
 /**
  * Simple position data class for storing coordinates
@@ -20,6 +21,14 @@ public class Position {
         this.x = x;
         this.y = y;
         this.z = z;
+    }
+
+    public static Position fromBlockPos(BlockPos pos) {
+        return new Position(pos.getX(), pos.getY(), pos.getZ());
+    }
+
+    public BlockPos toBlockPos() {
+        return BlockPos.containing(x, y, z);
     }
     
     @Override

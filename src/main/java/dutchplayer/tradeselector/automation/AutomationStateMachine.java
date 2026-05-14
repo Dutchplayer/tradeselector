@@ -1,362 +1,324 @@
 package dutchplayer.tradeselector.automation;
 
-
-import com.mojang.authlib.minecraft.client.MinecraftClient;
 import dutchplayer.tradeselector.config.ConfigManager;
 import dutchplayer.tradeselector.config.ModConfig;
 import dutchplayer.tradeselector.util.ModState;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.screens.inventory.MerchantScreen;
 import net.minecraft.core.BlockPos;
-import net.minecraft.world.entity.npc.VillagerProfession;
+import net.minecraft.core.Direction;
+import net.minecraft.network.chat.Component;
+import net.minecraft.sounds.SoundEvent;
+import net.minecraft.sounds.SoundEvents;
+import net.minecraft.world.InteractionHand;
+import net.minecraft.world.entity.npc.Villager;
+import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.item.trading.MerchantOffers;
 import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.world.phys.Vec3;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.w3c.dom.Text;
 
-/**
- * Core automation state machine for trade rerolling
- */
 public class AutomationStateMachine {
     private static final Logger LOGGER = LoggerFactory.getLogger("TradeSelector");
-    private static final int TICKS_PER_ACTION = 20; // 1 second between actions
-    private static final int MAX_WAIT_TICKS = 60; // 3 seconds max wait for refresh
-    
+    private static final int TICKS_PER_ACTION = 10;
+    private static final int BREAK_TIMEOUT_TICKS = 80;
+    private static final int REFRESH_WAIT_TICKS = 60;
+
     private final ModState modState;
     private final VillagerBinder villagerBinder;
     private final TradeScanner tradeScanner;
-    private final MinecraftClient client;
-    
-    private int actionTimer = 0;
-    private int waitTimer = 0;
-    private boolean hasLecternInInventory = false;
-    
+    private final Minecraft client;
+
+    private int actionTimer;
+    private int waitTimer;
+
     public AutomationStateMachine(ModState modState, VillagerBinder villagerBinder, TradeScanner tradeScanner) {
         this.modState = modState;
         this.villagerBinder = villagerBinder;
         this.tradeScanner = tradeScanner;
-        this.client = MinecraftClient.getInstance();
+        this.client = Minecraft.getInstance();
     }
-    
-    /**
-     * Main tick method called from client tick event
-     */
+
     public void tick() {
         if (!modState.isRunning()) {
             return;
         }
-        
+
         actionTimer++;
-        
+
         try {
             switch (modState.getCurrentState()) {
-                case BOUND:
-                    handleBoundState();
-                    break;
-                case BREAKING_JOB_BLOCK:
-                    handleBreakingJobBlock();
-                    break;
-                case PLACING_JOB_BLOCK:
-                    handlePlacingJobBlock();
-                    break;
-                case WAITING_FOR_REFRESH:
-                    handleWaitingForRefresh();
-                    break;
-                case SCANNING_TRADES:
-                    handleScanningTrades();
-                    break;
-                case FOUND_MATCH:
-                    handleFoundMatch();
-                    break;
-                case ERROR:
-                    handleError();
-                    break;
-                default:
-                    break;
+                case BOUND -> handleBoundState();
+                case BREAKING_JOB_BLOCK -> handleBreakingJobBlock();
+                case PLACING_JOB_BLOCK -> handlePlacingJobBlock();
+                case WAITING_FOR_REFRESH -> handleWaitingForRefresh();
+                case SCANNING_TRADES -> handleScanningTrades();
+                case FOUND_MATCH -> handleFoundMatch();
+                case ERROR -> handleError();
+                default -> {}
             }
         } catch (Exception e) {
-            LOGGER.error("Error in automation tick: " + e.getMessage(), e);
-            modState.setCurrentState(ModState.AutomationState.ERROR);
-            modState.setErrorMessage(e.getMessage());
+            LOGGER.error("Automation failed", e);
+            fail(e.getMessage());
         }
     }
-    
-    /**
-     * Start the automation process
-     */
+
     public boolean start() {
+        if (client.player == null || client.level == null || client.gameMode == null) {
+            fail("Join a world before starting automation");
+            return false;
+        }
+
         ModConfig config = ConfigManager.getConfig();
-        
-        // Validate configuration
         if (!config.boundVillager.isBound() || !config.boundJobBlock.isBound()) {
-            modState.setErrorMessage("Must bind both villager and job block before starting");
-            modState.setCurrentState(ModState.AutomationState.ERROR);
+            fail("Bind both a librarian and lectern before starting");
             return false;
         }
-        
-        // Check for lectern in inventory
-        hasLecternInInventory = hasLecternInInventory();
-        if (!hasLecternInInventory) {
-            modState.setErrorMessage("No lectern in inventory");
-            modState.setCurrentState(ModState.AutomationState.ERROR);
+
+        if (!villagerBinder.validateVillager()) {
+            fail("Bound librarian is missing or no longer a librarian");
             return false;
         }
-        
-        // Reset state
+
+        if (!villagerBinder.validateJobBlock()) {
+            fail("Bound lectern is missing");
+            return false;
+        }
+
+        if (findLecternSlot(client.player.getInventory()) == -1) {
+            fail("No lectern found in your inventory");
+            return false;
+        }
+
         modState.reset();
         modState.setCurrentState(ModState.AutomationState.BOUND);
         modState.setStartTime(System.currentTimeMillis());
-        
-        LOGGER.info("Starting automation");
+        actionTimer = 0;
+        waitTimer = 0;
+        LOGGER.info("Automation started");
         return true;
     }
-    
-    /**
-     * Stop the automation process
-     */
+
     public void stop() {
         modState.setCurrentState(ModState.AutomationState.STOPPED);
+        actionTimer = 0;
+        waitTimer = 0;
         LOGGER.info("Automation stopped");
     }
-    
+
     private void handleBoundState() {
-        if (actionTimer >= TICKS_PER_ACTION) {
-            actionTimer = 0;
-            modState.setCurrentState(ModState.AutomationState.BREAKING_JOB_BLOCK);
-            LOGGER.info("Starting to break job block");
+        if (actionTimer < TICKS_PER_ACTION) {
+            return;
         }
+
+        actionTimer = 0;
+        waitTimer = 0;
+        modState.setCurrentState(ModState.AutomationState.BREAKING_JOB_BLOCK);
     }
-    
+
     private void handleBreakingJobBlock() {
-        if (actionTimer >= TICKS_PER_ACTION) {
+        BlockPos lecternPos = ConfigManager.getConfig().boundJobBlock.position.toBlockPos();
+
+        if (client.level == null || client.gameMode == null || client.player == null) {
+            fail("Client is not ready");
+            return;
+        }
+
+        if (client.level.isEmptyBlock(lecternPos)) {
             actionTimer = 0;
-            
-            ModConfig config = ConfigManager.getConfig();
-            BlockPos lecternPos = new BlockPos(
-                (int) config.boundJobBlock.position.x,
-                (int) config.boundJobBlock.position.y,
-                (int) config.boundJobBlock.position.z
-            );
-            
-            // Check if lectern exists and break it
-            if (client.world.getBlockState(lecternPos).getBlock() == Blocks.LECTERN) {
-                // Look at the lectern
-                lookAtBlock(lecternPos);
-                
-                // Try to break it (simulate player action)
-                if (client.player != null) {
-                    client.interactionManager.attackBlock(lecternPos, 
-                        client.player.getHorizontalFacing().getOpposite());
-                }
-                
-                modState.setCurrentState(ModState.AutomationState.PLACING_JOB_BLOCK);
-                LOGGER.info("Broke lectern, now placing");
-            } else {
-                modState.setErrorMessage("Lectern not found at bound position");
-                modState.setCurrentState(ModState.AutomationState.ERROR);
-            }
+            modState.setCurrentState(ModState.AutomationState.PLACING_JOB_BLOCK);
+            return;
+        }
+
+        if (!client.level.getBlockState(lecternPos).is(Blocks.LECTERN)) {
+            fail("Bound block is no longer a lectern");
+            return;
+        }
+
+        lookAt(Vec3.atCenterOf(lecternPos));
+        if (actionTimer == 1) {
+            client.gameMode.startDestroyBlock(lecternPos, directionFromPlayerTo(lecternPos));
+            client.player.swing(InteractionHand.MAIN_HAND);
+        } else {
+            client.gameMode.continueDestroyBlock(lecternPos, directionFromPlayerTo(lecternPos));
+        }
+
+        if (actionTimer > BREAK_TIMEOUT_TICKS) {
+            client.gameMode.destroyBlock(lecternPos);
         }
     }
-    
+
     private void handlePlacingJobBlock() {
-        if (actionTimer >= TICKS_PER_ACTION) {
-            actionTimer = 0;
-            
-            ModConfig config = ConfigManager.getConfig();
-            BlockPos lecternPos = new BlockPos(
-                (int) config.boundJobBlock.position.x,
-                (int) config.boundJobBlock.position.y,
-                (int) config.boundJobBlock.position.z
-            );
-            
-            // Check if lectern is not there and place it
-            if (client.world.getBlockState(lecternPos).isAir()) {
-                // Look at the lectern position
-                lookAtBlock(lecternPos);
-                
-                // Try to place lectern
-                if (client.player != null) {
-                    PlayerInventory inventory = client.player.getInventory();
-                    int lecternSlot = findLecternSlot(inventory);
-                    
-                    if (lecternSlot != -1) {
-                        // Select lectern
-                        inventory.selectedSlot = lecternSlot;
-                        
-                        // Place block (simulate right-click)
-                        client.interactionManager.interactBlock(
-                            client.player, 
-                            client.player.getActiveHand(),
-                            new BlockHitResult(
-                                Vec3d.ofCenter(lecternPos),
-                                client.player.getHorizontalFacing(),
-                                lecternPos,
-                                false
-                            )
-                        );
-                        
-                        modState.setCurrentState(ModState.AutomationState.WAITING_FOR_REFRESH);
-                        waitTimer = 0;
-                        LOGGER.info("Placed lectern, waiting for refresh");
-                    } else {
-                        modState.setErrorMessage("Lectern not found in inventory");
-                        modState.setCurrentState(ModState.AutomationState.ERROR);
-                    }
-                }
-            } else {
-                modState.setCurrentState(ModState.AutomationState.WAITING_FOR_REFRESH);
-                waitTimer = 0;
-                LOGGER.info("Lectern already exists, waiting for refresh");
-            }
+        if (actionTimer < TICKS_PER_ACTION) {
+            return;
         }
+
+        actionTimer = 0;
+        BlockPos lecternPos = ConfigManager.getConfig().boundJobBlock.position.toBlockPos();
+
+        if (client.level == null || client.gameMode == null || client.player == null) {
+            fail("Client is not ready");
+            return;
+        }
+
+        if (!client.level.isEmptyBlock(lecternPos)) {
+            modState.setCurrentState(ModState.AutomationState.WAITING_FOR_REFRESH);
+            waitTimer = 0;
+            return;
+        }
+
+        Inventory inventory = client.player.getInventory();
+        int lecternSlot = findLecternSlot(inventory);
+        if (lecternSlot == -1) {
+            fail("No lectern found in your inventory");
+            return;
+        }
+
+        if (Inventory.isHotbarSlot(lecternSlot)) {
+            inventory.selected = lecternSlot;
+        } else {
+            inventory.pickSlot(lecternSlot);
+        }
+
+        BlockPos supportPos = lecternPos.below();
+        lookAt(Vec3.atCenterOf(lecternPos));
+        client.gameMode.useItemOn(
+                client.player,
+                InteractionHand.MAIN_HAND,
+                new BlockHitResult(Vec3.atCenterOf(supportPos), Direction.UP, supportPos, false)
+        );
+        client.player.swing(InteractionHand.MAIN_HAND);
+
+        modState.setCurrentState(ModState.AutomationState.WAITING_FOR_REFRESH);
+        waitTimer = 0;
     }
-    
+
     private void handleWaitingForRefresh() {
         waitTimer++;
-        
-        if (waitTimer >= MAX_WAIT_TICKS) {
+        if (waitTimer >= REFRESH_WAIT_TICKS) {
             waitTimer = 0;
-            modState.setCurrentState(ModState.AutomationState.SCANNING_TRADES);
-            LOGGER.info("Wait complete, scanning trades");
-        }
-    }
-    
-    private void handleScanningTrades() {
-        if (actionTimer >= TICKS_PER_ACTION) {
             actionTimer = 0;
-            
-            // Try to open villager trades
-            ModConfig config = ConfigManager.getConfig();
-            VillagerEntity villager = findVillagerAt(config.boundVillager.position);
-            
-            if (villager != null && villager.getVillagerData().getProfession() == VillagerProfession.LIBRARIAN) {
-                // Look at villager and interact
-                lookAtEntity(villager);
-                
-                if (client.player != null) {
-                    client.interactionManager.interactEntity(
-                        client.player, 
-                        villager, 
-                        client.player.getActiveHand()
-                    );
-                }
-                
-                // Check trades (this would be handled in a screen handler listener)
-                // For now, simulate the check
-                modState.incrementAttemptCount();
-                
-                boolean found = tradeScanner.checkForMatchingTrade(villager);
-                if (found) {
-                    modState.setCurrentState(ModState.AutomationState.FOUND_MATCH);
-                    LOGGER.info("Found matching trade!");
-                } else {
-                    // Continue the loop
-                    modState.setCurrentState(ModState.AutomationState.BOUND);
-                    LOGGER.info("No matching trade, continuing (attempt " + modState.getAttemptCount() + ")");
-                }
-            } else {
-                modState.setErrorMessage("Librarian villager not found at bound position");
-                modState.setCurrentState(ModState.AutomationState.ERROR);
-            }
+            modState.setCurrentState(ModState.AutomationState.SCANNING_TRADES);
         }
     }
-    
+
+    private void handleScanningTrades() {
+        if (actionTimer < TICKS_PER_ACTION) {
+            return;
+        }
+
+        Villager villager = villagerBinder.getBoundVillager();
+        if (villager == null) {
+            fail("Bound librarian was not found");
+            return;
+        }
+
+        if (waitTimer == 0) {
+            actionTimer = 0;
+            lookAt(villager.getEyePosition());
+            if (client.player != null && client.gameMode != null) {
+                client.gameMode.interact(client.player, villager, InteractionHand.MAIN_HAND);
+                client.player.swing(InteractionHand.MAIN_HAND);
+            }
+            modState.incrementAttemptCount();
+            waitTimer = 1;
+            return;
+        }
+
+        waitTimer++;
+        if (waitTimer < 12) {
+            return;
+        }
+
+        MerchantOffers offers = null;
+        if (client.screen instanceof MerchantScreen merchantScreen) {
+            offers = merchantScreen.getMenu().getOffers();
+        }
+        if (offers == null || offers.isEmpty()) {
+            offers = villager.getOffers();
+        }
+
+        boolean found = tradeScanner.checkForMatchingTrade(offers);
+        if (found) {
+            modState.setCurrentState(ModState.AutomationState.FOUND_MATCH);
+        } else {
+            if (client.player != null) {
+                client.player.closeContainer();
+            }
+            waitTimer = 0;
+            actionTimer = 0;
+            modState.setCurrentState(ModState.AutomationState.BOUND);
+        }
+    }
+
     private void handleFoundMatch() {
-        // Play success sound and message
         if (client.player != null) {
-            client.player.sendMessage(Text.literal("§a§lFound matching trade!"), false);
-            
-            if (ConfigManager.getConfig().settings.playSoundOnSuccess) {
-                client.player.playSound(
-                    net.minecraft.sound.SoundEvents.ENTITY_VILLAGER_YES, 
-                    1.0f, 
-                    1.0f
-                );
+            client.player.displayClientMessage(Component.literal("Found matching trade"), false);
+            SoundEvent sound = successSound();
+            if (sound != null) {
+                client.player.playSound(sound, 1.0f, 1.0f);
             }
         }
-        
-        modState.setCurrentState(ModState.AutomationState.STOPPED);
-        LOGGER.info("Automation completed successfully");
+
+        stop();
     }
-    
+
+    private SoundEvent successSound() {
+        return switch (ConfigManager.getConfig().settings.getSuccessSound()) {
+            case NONE -> null;
+            case VILLAGER_YES -> SoundEvents.VILLAGER_YES;
+            case LEVEL_UP -> SoundEvents.PLAYER_LEVELUP;
+            case EXPERIENCE_ORB -> SoundEvents.EXPERIENCE_ORB_PICKUP;
+            case AMETHYST_CHIME -> SoundEvents.AMETHYST_BLOCK_CHIME;
+            case CHALLENGE_COMPLETE -> SoundEvents.UI_TOAST_CHALLENGE_COMPLETE;
+        };
+    }
+
     private void handleError() {
-        // Error state - wait for manual intervention
-        if (client.player != null) {
-            client.player.sendMessage(
-                Text.literal("§cError: " + modState.getErrorMessage()), 
-                false
-            );
-        }
+        stop();
     }
-    
-    private boolean hasLecternInInventory() {
-        if (client.player == null) return false;
-        
-        PlayerInventory inventory = client.player.getInventory();
-        for (int i = 0; i < inventory.size(); i++) {
-            ItemStack stack = inventory.getStack(i);
-            if (stack.getItem() == Items.LECTERN) {
-                return true;
-            }
-        }
-        return false;
-    }
-    
-    private int findLecternSlot(PlayerInventory inventory) {
-        for (int i = 0; i < inventory.size(); i++) {
-            ItemStack stack = inventory.getStack(i);
-            if (stack.getItem() == Items.LECTERN) {
+
+    private int findLecternSlot(Inventory inventory) {
+        for (int i = 0; i < inventory.getContainerSize(); i++) {
+            ItemStack stack = inventory.getItem(i);
+            if (stack.is(Items.LECTERN)) {
                 return i;
             }
         }
         return -1;
     }
-    
-    private VillagerEntity findVillagerAt(dutchplayer.tradeselector.util.Position position) {
-        if (client.world == null) return null;
-        
-        BlockPos searchPos = new BlockPos(
-            (int) position.x,
-            (int) position.y,
-            (int) position.z
-        );
-        
-        return client.world.getEntitiesByClass(VillagerEntity.class, 
-            searchPos, 
-            entity -> entity.getBlockPos().equals(searchPos))
-            .stream()
-            .findFirst()
-            .orElse(null);
+
+    private void lookAt(Vec3 target) {
+        if (client.player == null) {
+            return;
+        }
+
+        Vec3 playerPos = client.player.getEyePosition();
+        Vec3 direction = target.subtract(playerPos).normalize();
+        float yaw = (float) Math.toDegrees(Math.atan2(direction.z, direction.x)) - 90.0f;
+        float pitch = (float) Math.toDegrees(-Math.asin(direction.y));
+        client.player.setYRot(yaw);
+        client.player.setXRot(pitch);
     }
-    
-    private void lookAtBlock(BlockPos pos) {
-        if (client.player == null) return;
-        
-        Vec3d playerPos = client.player.getEyePos();
-        Vec3d blockCenter = Vec3d.ofCenter(pos);
-        
-        Vec3d lookDirection = blockCenter.subtract(playerPos).normalize();
-        
-        float yaw = (float) Math.toDegrees(Math.atan2(lookDirection.z, lookDirection.x)) - 90f;
-        float pitch = (float) Math.toDegrees(-Math.asin(lookDirection.y));
-        
-        client.player.setYaw(yaw);
-        client.player.setPitch(pitch);
+
+    private Direction directionFromPlayerTo(BlockPos pos) {
+        if (client.player == null) {
+            return Direction.UP;
+        }
+
+        Vec3 delta = Vec3.atCenterOf(pos).subtract(client.player.getEyePosition());
+        return Direction.getNearest(delta.x, delta.y, delta.z).getOpposite();
     }
-    
-    private void lookAtEntity(VillagerEntity entity) {
-        if (client.player == null) return;
-        
-        Vec3d playerPos = client.player.getEyePos();
-        Vec3d entityPos = entity.getEyePos();
-        
-        Vec3d lookDirection = entityPos.subtract(playerPos).normalize();
-        
-        float yaw = (float) Math.toDegrees(Math.atan2(lookDirection.z, lookDirection.x)) - 90f;
-        float pitch = (float) Math.toDegrees(-Math.asin(lookDirection.y));
-        
-        client.player.setYaw(yaw);
-        client.player.setPitch(pitch);
+
+    private void fail(String message) {
+        modState.setErrorMessage(message == null || message.isBlank() ? "Unknown automation error" : message);
+        modState.setCurrentState(ModState.AutomationState.ERROR);
+        if (client.player != null) {
+            client.player.displayClientMessage(Component.literal(modState.getErrorMessage()), false);
+        }
     }
 }

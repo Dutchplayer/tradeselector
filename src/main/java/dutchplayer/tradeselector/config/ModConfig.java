@@ -58,6 +58,20 @@ public class ModConfig {
     public static class BoundVillagerConfig {
         @SerializedName("position")
         public Position position = null;
+
+        @SerializedName("uuid")
+        public String uuid = null;
+
+        public BoundVillagerConfig() {}
+
+        public BoundVillagerConfig(Position position) {
+            this.position = position;
+        }
+
+        public BoundVillagerConfig(Position position, String uuid) {
+            this.position = position;
+            this.uuid = uuid;
+        }
         
         public boolean isBound() {
             return position != null;
@@ -67,6 +81,12 @@ public class ModConfig {
     public static class BoundJobBlockConfig {
         @SerializedName("position")
         public Position position = null;
+
+        public BoundJobBlockConfig() {}
+
+        public BoundJobBlockConfig(Position position) {
+            this.position = position;
+        }
         
         public boolean isBound() {
             return position != null;
@@ -76,6 +96,41 @@ public class ModConfig {
     public static class SettingsConfig {
         @SerializedName("playSoundOnSuccess")
         public boolean playSoundOnSuccess = true;
+
+        @SerializedName("successSound")
+        public SuccessSound successSound = SuccessSound.VILLAGER_YES;
+
+        public SuccessSound getSuccessSound() {
+            if (!playSoundOnSuccess) {
+                return SuccessSound.NONE;
+            }
+            return successSound == null ? SuccessSound.VILLAGER_YES : successSound;
+        }
+    }
+
+    public enum SuccessSound {
+        @SerializedName("none")
+        NONE("None"),
+        @SerializedName("villager_yes")
+        VILLAGER_YES("Villager Yes"),
+        @SerializedName("level_up")
+        LEVEL_UP("Level Up"),
+        @SerializedName("experience_orb")
+        EXPERIENCE_ORB("Experience Orb"),
+        @SerializedName("amethyst_chime")
+        AMETHYST_CHIME("Amethyst Chime"),
+        @SerializedName("challenge_complete")
+        CHALLENGE_COMPLETE("Challenge Complete");
+
+        private final String displayName;
+
+        SuccessSound(String displayName) {
+            this.displayName = displayName;
+        }
+
+        public String getDisplayName() {
+            return displayName;
+        }
     }
     
     public enum LevelMode {
