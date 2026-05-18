@@ -1,6 +1,6 @@
 # Trade Selector
 
-Client-side Fabric mod for Minecraft 1.21.1 that automates librarian enchanted-book trade rerolling.
+Client-side Fabric mod for Minecraft 1.21.x that automates librarian enchanted-book trade rerolling.
 
 ## Usage
 
