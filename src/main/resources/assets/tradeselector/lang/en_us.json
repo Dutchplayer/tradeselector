@@ -3,5 +3,7 @@
   "key.tradeselector.bind_villager": "Bind Villager",
   "key.tradeselector.bind_job_block": "Bind Lectern",
   "key.tradeselector.toggle_automation": "Toggle Automation",
+  "key.category.tradeselector.keybinds": "Trade Selector",
+  "key.categories.tradeselector.keybinds": "Trade Selector",
   "category.tradeselector": "Trade Selector"
 }
