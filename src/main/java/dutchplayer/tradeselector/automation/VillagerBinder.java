@@ -6,6 +6,7 @@ import dutchplayer.tradeselector.util.PlayerMessages;
 import dutchplayer.tradeselector.util.Position;
 import net.minecraft.client.Minecraft;
 import net.minecraft.core.BlockPos;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.npc.Villager;
 import net.minecraft.world.entity.npc.VillagerProfession;
@@ -20,6 +21,9 @@ import net.minecraft.world.phys.Vec3;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.util.Comparator;
 import java.util.UUID;
 
@@ -27,6 +31,10 @@ public class VillagerBinder {
     private static final Logger LOGGER = LoggerFactory.getLogger("TradeSelector");
     private static final double LOOK_FALLBACK_MAX_DISTANCE_BLOCKS = 3.0;
     private static final double LOOK_FALLBACK_MIN_ALIGNMENT = 0.25;
+    private static final String LIBRARIAN_PROFESSION_ID = "minecraft:librarian";
+    private static final String LIBRARIAN_NAME = "librarian";
+    private static Method villagerProfessionAccessor;
+    private static boolean villagerProfessionAccessorResolved;
     private final Minecraft client;
 
     public VillagerBinder() {
@@ -50,7 +58,7 @@ public class VillagerBinder {
             return false;
         }
 
-        if (villager.getVillagerData().getProfession() != VillagerProfession.LIBRARIAN) {
+        if (!isLibrarian(villager)) {
             PlayerMessages.send(client.player, "That villager is not a librarian");
             return false;
         }
@@ -123,7 +131,7 @@ public class VillagerBinder {
         }
 
         Villager villagerByUuid = getBoundVillagerByUuid(config.boundVillager.uuid);
-        if (villagerByUuid != null && villagerByUuid.getVillagerData().getProfession() == VillagerProfession.LIBRARIAN) {
+        if (villagerByUuid != null && isLibrarian(villagerByUuid)) {
             return villagerByUuid;
         }
 
@@ -142,7 +150,7 @@ public class VillagerBinder {
         return client.level.getEntities(
                         EntityTypeTest.forClass(Villager.class),
                         searchBox,
-                        villager -> villager.getVillagerData().getProfession() == VillagerProfession.LIBRARIAN
+                        this::isLibrarian
                 )
                 .stream()
                 .filter(villager -> {
@@ -157,6 +165,180 @@ public class VillagerBinder {
                 })
                 .min(Comparator.comparingDouble(villager -> villager.distanceToSqr(client.player)))
                 .orElse(null);
+    }
+
+    private boolean isLibrarian(Villager villager) {
+        VillagerProfession profession = getVillagerProfession(villager);
+        if (profession == null) {
+            return true;
+        }
+
+        ResourceLocation professionId = getProfessionId(profession);
+        if (professionId != null && LIBRARIAN_PROFESSION_ID.equals(professionId.toString())) {
+            return true;
+        }
+
+        String professionName = resolveProfessionName(profession);
+        if (professionName == null) {
+            return true;
+        }
+
+        return professionName.equalsIgnoreCase(LIBRARIAN_NAME)
+                || professionName.contains(LIBRARIAN_NAME);
+    }
+
+    private static ResourceLocation getProfessionId(VillagerProfession profession) {
+        if (profession == null) {
+            return null;
+        }
+
+        for (Field field : net.minecraft.core.registries.BuiltInRegistries.class.getDeclaredFields()) {
+            if (!Modifier.isStatic(field.getModifiers())) {
+                continue;
+            }
+
+            try {
+                field.setAccessible(true);
+                Object registry = field.get(null);
+                ResourceLocation id = tryResolveRegistryKey(registry, profession);
+                if (id != null) {
+                    return id;
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+
+        return null;
+    }
+
+    private static String resolveProfessionName(VillagerProfession profession) {
+        if (profession == null) {
+            return null;
+        }
+
+        String fromMethod = invokeProfessionNameMethod(profession);
+        if (fromMethod != null) {
+            return normalizeProfessionName(fromMethod);
+        }
+
+        return normalizeProfessionName(profession.toString());
+    }
+
+    private static String invokeProfessionNameMethod(VillagerProfession profession) {
+        for (Method method : profession.getClass().getMethods()) {
+            if (method.getParameterCount() != 0 || method.getReturnType() != String.class) {
+                continue;
+            }
+
+            String name = method.getName().toLowerCase();
+            if (!name.contains("name") && !name.contains("id") && !name.contains("key")) {
+                continue;
+            }
+
+            try {
+                Object value = method.invoke(profession);
+                if (value instanceof String stringValue && !stringValue.isBlank()) {
+                    return stringValue;
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+
+        return null;
+    }
+
+    private static String normalizeProfessionName(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+
+        String normalized = value.trim().toLowerCase();
+        if (normalized.contains(LIBRARIAN_NAME)) {
+            return LIBRARIAN_NAME;
+        }
+
+        normalized = normalized.replaceAll("[^a-z0-9_:]", "");
+        int colonIndex = normalized.lastIndexOf(':');
+        if (colonIndex >= 0 && colonIndex + 1 < normalized.length()) {
+            normalized = normalized.substring(colonIndex + 1);
+        }
+
+        if (normalized.contains(LIBRARIAN_NAME)) {
+            return LIBRARIAN_NAME;
+        }
+
+        if (normalized.isBlank()) {
+            return null;
+        }
+
+        return normalized;
+    }
+
+    private static ResourceLocation tryResolveRegistryKey(Object registry, VillagerProfession profession) {
+        if (registry == null) {
+            return null;
+        }
+
+        for (Method method : registry.getClass().getMethods()) {
+            if (method.getParameterCount() != 1 || method.getReturnType() != ResourceLocation.class) {
+                continue;
+            }
+
+            Class<?> parameterType = method.getParameterTypes()[0];
+            if (!parameterType.isInstance(profession) && parameterType != Object.class) {
+                continue;
+            }
+
+            try {
+                Object id = method.invoke(registry, profession);
+                if (id instanceof ResourceLocation resourceLocation) {
+                    return resourceLocation;
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+
+        return null;
+    }
+
+    private static VillagerProfession getVillagerProfession(Villager villager) {
+        if (villager == null) {
+            return null;
+        }
+
+        Object villagerData = villager.getVillagerData();
+        if (villagerData == null) {
+            return null;
+        }
+
+        Method accessor = resolveVillagerProfessionAccessor(villagerData.getClass());
+        if (accessor == null) {
+            return null;
+        }
+
+        try {
+            Object result = accessor.invoke(villagerData);
+            return result instanceof VillagerProfession profession ? profession : null;
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static Method resolveVillagerProfessionAccessor(Class<?> villagerDataClass) {
+        if (villagerProfessionAccessorResolved) {
+            return villagerProfessionAccessor;
+        }
+
+        villagerProfessionAccessorResolved = true;
+        for (Method method : villagerDataClass.getMethods()) {
+            if (method.getParameterCount() == 0 && VillagerProfession.class.isAssignableFrom(method.getReturnType())) {
+                method.setAccessible(true);
+                villagerProfessionAccessor = method;
+                break;
+            }
+        }
+
+        return villagerProfessionAccessor;
     }
 
     private Villager getBoundVillagerByUuid(String uuidText) {

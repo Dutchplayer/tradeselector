@@ -4,29 +4,50 @@ import dutchplayer.tradeselector.automation.TradeScanner;
 import dutchplayer.tradeselector.config.ConfigManager;
 import dutchplayer.tradeselector.config.ModConfig;
 import dutchplayer.tradeselector.util.PlayerMessages;
+import net.fabricmc.fabric.api.client.screen.v1.ScreenMouseEvents;
 import net.minecraft.client.gui.Font;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.components.AbstractWidget;
 import net.minecraft.client.gui.components.Button;
-import net.minecraft.client.gui.components.CycleButton;
 import net.minecraft.client.gui.components.EditBox;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
+import net.minecraft.util.FormattedCharSequence;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
+import java.lang.reflect.Method;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.function.Consumer;
 import java.util.function.Function;
 
 public class TradeSelectorScreen extends Screen {
+    private static final Logger LOGGER = LoggerFactory.getLogger("TradeSelector");
     private static final int PANEL_WIDTH = 330;
     private static final int PANEL_HEIGHT = 270;
+    private static boolean supportsFill = true;
+    private static boolean supportsOutline = true;
+    private static boolean supportsDrawStringWithShadow = true;
+    private static boolean supportsDrawStringWithoutShadow = true;
+    private static boolean supportsDrawFormattedWithShadow = true;
+    private static boolean supportsDrawFormattedWithoutShadow = true;
+    private static boolean supportsFontDrawInBatch = true;
+    private static boolean drawStringFallbackResolved = false;
+    private static Method drawStringFallbackMethod;
+    private static boolean drawStringFallbackUsesShadow;
+    private static final Set<String> TEXT_RENDER_DEBUG_EVENTS = new HashSet<>();
 
     private Dropdown<String> enchantmentDropdown;
-    private CycleButton<ModConfig.LevelMode> levelModeButton;
+    private Button levelModeButton;
+    private ModConfig.LevelMode selectedLevelMode;
     private Dropdown<ModConfig.SuccessSound> successSoundDropdown;
-    private CycleButton<Boolean> lecternRecoveryWalkButton;
+    private Button lecternRecoveryWalkButton;
+    private boolean lecternRecoveryWalkEnabled;
+    private boolean mouseBridgeRegistered;
     private EditBox exactLevelField;
     private EditBox minLevelField;
     private EditBox maxLevelField;
@@ -67,10 +88,14 @@ public class TradeSelectorScreen extends Screen {
                 }
         );
 
-        levelModeButton = CycleButton.builder((ModConfig.LevelMode mode) -> Component.literal(mode.name()))
-                .withValues(ModConfig.LevelMode.values())
-                .withInitialValue(config.targetTrade.levelMode)
-                .create(panelX + 120, panelY + 62, 120, 20, Component.literal("Level"), (button, value) -> updateLevelFieldsVisibility());
+        selectedLevelMode = config.targetTrade.levelMode;
+        levelModeButton = Button.builder(levelModeMessage(), button -> {
+                    selectedLevelMode = nextLevelMode(selectedLevelMode);
+                    updateLevelModeButtonMessage();
+                    updateLevelFieldsVisibility();
+                })
+                .bounds(panelX + 120, panelY + 62, 120, 20)
+                .build();
 
         exactLevelField = numberField(panelX + 120, panelY + 92, 46, "Exact", config.targetTrade.exactLevel, 2);
         minLevelField = numberField(panelX + 120, panelY + 92, 46, "Min", config.targetTrade.minimumLevel, 2);
@@ -90,8 +115,13 @@ public class TradeSelectorScreen extends Screen {
                 value -> {}
         );
 
-        lecternRecoveryWalkButton = CycleButton.onOffBuilder(config.settings.enableLecternRecoveryWalk)
-                .create(panelX + 120, panelY + 182, 120, 20, Component.literal("Recovery Walk"), (button, value) -> {});
+        lecternRecoveryWalkEnabled = config.settings.enableLecternRecoveryWalk;
+        lecternRecoveryWalkButton = Button.builder(recoveryWalkMessage(), button -> {
+                    lecternRecoveryWalkEnabled = !lecternRecoveryWalkEnabled;
+                    updateRecoveryWalkButtonMessage();
+                })
+                .bounds(panelX + 120, panelY + 182, 120, 20)
+                .build();
 
         addRenderableWidget(levelModeButton);
         addRenderableWidget(lecternRecoveryWalkButton);
@@ -105,27 +135,30 @@ public class TradeSelectorScreen extends Screen {
                 .build();
         addRenderableWidget(saveButton);
 
+        registerDropdownMouseBridge();
         updateLevelFieldsVisibility();
         clampLevelFieldsToSelectedEnchantment();
     }
 
     @Override
+    public void renderBackground(GuiGraphics graphics, int mouseX, int mouseY, float delta) {
+    }
+
+    @Override
+    public void renderTransparentBackground(GuiGraphics graphics) {
+    }
+
+    @Override
+    protected void renderBlurredBackground(float delta) {
+    }
+
+    @Override
     public void render(GuiGraphics graphics, int mouseX, int mouseY, float delta) {
-        super.render(graphics, mouseX, mouseY, delta);
-        
         int panelX = (this.width - PANEL_WIDTH) / 2;
         int panelY = (this.height - PANEL_HEIGHT) / 2;
         
-        graphics.fill(panelX, panelY, panelX + PANEL_WIDTH, panelY + PANEL_HEIGHT, 0xFF202020);
-        graphics.renderOutline(panelX, panelY, PANEL_WIDTH, PANEL_HEIGHT, 0xFF707070);
-
-        graphics.drawCenteredString(this.font, this.title, this.width / 2, panelY + 10, 0xFFFFFF);
-        graphics.drawString(this.font, "Enchantment", panelX + 20, panelY + 38, 0xCCCCCC, false);
-        graphics.drawString(this.font, "Level Mode", panelX + 20, panelY + 68, 0xCCCCCC, false);
-        graphics.drawString(this.font, "Level (max " + selectedEnchantmentMaxLevel() + ")", panelX + 20, panelY + 98, 0xCCCCCC, false);
-        graphics.drawString(this.font, "Max Price", panelX + 20, panelY + 128, 0xCCCCCC, false);
-        graphics.drawString(this.font, "Success Sound", panelX + 20, panelY + 158, 0xCCCCCC, false);
-        graphics.drawString(this.font, "Recovery Walk", panelX + 20, panelY + 188, 0xCCCCCC, false);
+        safeFill(graphics, panelX, panelY, panelX + PANEL_WIDTH, panelY + PANEL_HEIGHT, 0xFF202020);
+        safeOutline(graphics, panelX, panelY, PANEL_WIDTH, PANEL_HEIGHT, 0xFF707070);
 
         renderEditBoxBackground(graphics, exactLevelField, mouseX, mouseY, 0xFF606666, 0xFF707777, 0xFF000000, 0xFF8A8A8A);
         renderEditBoxBackground(graphics, minLevelField, mouseX, mouseY, 0xFF606666, 0xFF707777, 0xFF000000, 0xFF8A8A8A);
@@ -136,25 +169,26 @@ public class TradeSelectorScreen extends Screen {
         renderButtonBackground(graphics, saveButton, 0xFF353535, 0xFF454545, 0xFF8A8A8A, 0xFFFFFFFF,
                 enchantmentDropdown.isOpen() || successSoundDropdown.isOpen());
 
+        super.render(graphics, mouseX, mouseY, delta);
+
+        safeDrawCenteredString(graphics, this.font, this.title, this.width / 2, panelY + 10, 0xFFFFFF);
+        safeDrawString(graphics, this.font, "Enchantment", panelX + 20, panelY + 38, 0xCCCCCC, false);
+        safeDrawString(graphics, this.font, "Level Mode", panelX + 20, panelY + 68, 0xCCCCCC, false);
+        safeDrawString(graphics, this.font, "Level (max " + selectedEnchantmentMaxLevel() + ")", panelX + 20, panelY + 98, 0xCCCCCC, false);
+        safeDrawString(graphics, this.font, "Max Price", panelX + 20, panelY + 128, 0xCCCCCC, false);
+        safeDrawString(graphics, this.font, "Success Sound", panelX + 20, panelY + 158, 0xCCCCCC, false);
+        safeDrawString(graphics, this.font, "Recovery Walk", panelX + 20, panelY + 188, 0xCCCCCC, false);
+
         enchantmentDropdown.renderButton(graphics, mouseX, mouseY);
         successSoundDropdown.renderButton(graphics, mouseX, mouseY);
-        enchantmentDropdown.renderMenu(graphics, mouseX, mouseY);
-        successSoundDropdown.renderMenu(graphics, mouseX, mouseY);
+        renderDropdownMenus(graphics, mouseX, mouseY);
     }
 
     @Override
     public boolean mouseClicked(double mouseX, double mouseY, int button) {
-        if (enchantmentDropdown.mouseClicked(mouseX, mouseY, button)) {
-            successSoundDropdown.close();
+        if (handleDropdownMouseClick(mouseX, mouseY, button)) {
             return true;
         }
-        if (successSoundDropdown.mouseClicked(mouseX, mouseY, button)) {
-            enchantmentDropdown.close();
-            return true;
-        }
-
-        enchantmentDropdown.close();
-        successSoundDropdown.close();
         return super.mouseClicked(mouseX, mouseY, button);
     }
 
@@ -192,6 +226,49 @@ public class TradeSelectorScreen extends Screen {
         return false;
     }
 
+    private void registerDropdownMouseBridge() {
+        if (mouseBridgeRegistered) {
+            return;
+        }
+
+        mouseBridgeRegistered = true;
+        ScreenMouseEvents.allowMouseClick(this).register((screen, mouseX, mouseY, button) -> {
+            if (screen != this) {
+                return true;
+            }
+            return !handleDropdownMouseClick(mouseX, mouseY, button);
+        });
+    }
+
+    private boolean handleDropdownMouseClick(double mouseX, double mouseY, int button) {
+        boolean wasEnchantmentOpen = enchantmentDropdown.isOpen();
+        boolean wasSuccessSoundOpen = successSoundDropdown.isOpen();
+
+        if (enchantmentDropdown.mouseClicked(mouseX, mouseY, button)) {
+            successSoundDropdown.close();
+            return true;
+        }
+        if (successSoundDropdown.mouseClicked(mouseX, mouseY, button)) {
+            enchantmentDropdown.close();
+            return true;
+        }
+
+        if (wasEnchantmentOpen || wasSuccessSoundOpen) {
+            enchantmentDropdown.close();
+            successSoundDropdown.close();
+            return true;
+        }
+
+        enchantmentDropdown.close();
+        successSoundDropdown.close();
+        return false;
+    }
+
+    private void renderDropdownMenus(GuiGraphics graphics, int mouseX, int mouseY) {
+        enchantmentDropdown.renderMenu(graphics, mouseX, mouseY);
+        successSoundDropdown.renderMenu(graphics, mouseX, mouseY);
+    }
+
     private EditBox numberField(int x, int y, int width, String label, int value, int maxLength) {
         EditBox field = new EditBox(this.font, x, y, width, 20, Component.literal(label));
         field.setValue(String.valueOf(value));
@@ -201,11 +278,12 @@ public class TradeSelectorScreen extends Screen {
     }
 
     private void updateLevelFieldsVisibility() {
-        if (selectedEnchantmentMaxLevel() <= 1 && levelModeButton.getValue() == ModConfig.LevelMode.RANGE) {
-            levelModeButton.setValue(ModConfig.LevelMode.EXACT);
+        if (selectedEnchantmentMaxLevel() <= 1 && selectedLevelMode == ModConfig.LevelMode.RANGE) {
+            selectedLevelMode = ModConfig.LevelMode.EXACT;
+            updateLevelModeButtonMessage();
         }
 
-        ModConfig.LevelMode mode = levelModeButton.getValue();
+        ModConfig.LevelMode mode = selectedLevelMode;
         exactLevelField.setVisible(mode == ModConfig.LevelMode.EXACT);
         exactLevelField.active = mode == ModConfig.LevelMode.EXACT;
         minLevelField.setVisible(mode == ModConfig.LevelMode.RANGE);
@@ -220,7 +298,7 @@ public class TradeSelectorScreen extends Screen {
             ModConfig.TargetTradeConfig target = new ModConfig.TargetTradeConfig();
             target.enchantment = enchantmentDropdown.getValue();
             int enchantmentMaxLevel = selectedEnchantmentMaxLevel();
-            target.levelMode = normalizedLevelMode(levelModeButton.getValue(), enchantmentMaxLevel);
+            target.levelMode = normalizedLevelMode(selectedLevelMode, enchantmentMaxLevel);
             target.exactLevel = clamp(parseNumber(exactLevelField, currentConfig.targetTrade.exactLevel), 1, enchantmentMaxLevel);
             target.minimumLevel = clamp(parseNumber(minLevelField, currentConfig.targetTrade.minimumLevel), 1, enchantmentMaxLevel);
             target.maximumLevel = clamp(parseNumber(maxLevelField, currentConfig.targetTrade.maximumLevel), target.minimumLevel, enchantmentMaxLevel);
@@ -229,13 +307,14 @@ public class TradeSelectorScreen extends Screen {
             ModConfig.SettingsConfig settings = new ModConfig.SettingsConfig();
             settings.successSound = successSoundDropdown.getValue();
             settings.playSoundOnSuccess = settings.successSound != ModConfig.SuccessSound.NONE;
-            settings.enableLecternRecoveryWalk = lecternRecoveryWalkButton.getValue();
+            settings.enableLecternRecoveryWalk = lecternRecoveryWalkEnabled;
 
             ConfigManager.updateConfig(new ModConfig(target, currentConfig.boundVillager, currentConfig.boundJobBlock, settings));
             exactLevelField.setValue(String.valueOf(target.exactLevel));
             minLevelField.setValue(String.valueOf(target.minimumLevel));
             maxLevelField.setValue(String.valueOf(target.maximumLevel));
-            levelModeButton.setValue(target.levelMode);
+            selectedLevelMode = target.levelMode;
+            updateLevelModeButtonMessage();
             updateLevelFieldsVisibility();
 
             if (minecraft != null && minecraft.player != null) {
@@ -286,6 +365,28 @@ public class TradeSelectorScreen extends Screen {
             return ModConfig.LevelMode.EXACT;
         }
         return mode;
+    }
+
+    private ModConfig.LevelMode nextLevelMode(ModConfig.LevelMode currentMode) {
+        ModConfig.LevelMode[] modes = ModConfig.LevelMode.values();
+        int nextIndex = (currentMode.ordinal() + 1) % modes.length;
+        return modes[nextIndex];
+    }
+
+    private Component levelModeMessage() {
+        return Component.literal(selectedLevelMode.name());
+    }
+
+    private void updateLevelModeButtonMessage() {
+        levelModeButton.setMessage(levelModeMessage());
+    }
+
+    private Component recoveryWalkMessage() {
+        return Component.literal(lecternRecoveryWalkEnabled ? "ON" : "OFF");
+    }
+
+    private void updateRecoveryWalkButtonMessage() {
+        lecternRecoveryWalkButton.setMessage(recoveryWalkMessage());
     }
 
     private int selectedEnchantmentMaxLevel() {
@@ -340,9 +441,9 @@ public class TradeSelectorScreen extends Screen {
         int fillColor = hovered ? hoverFillColor : normalFillColor;
         int outlineColor = hovered ? hoverOutlineColor : normalOutlineColor;
         // Fill background
-        graphics.fill(x - 1, y - 1, x + w + 1, y + h + 1, fillColor);
+        safeFill(graphics, x - 1, y - 1, x + w + 1, y + h + 1, fillColor);
         // Draw black frame
-        graphics.renderOutline(x - 1, y - 1, w + 2, h + 2, outlineColor);
+        safeOutline(graphics, x - 1, y - 1, w + 2, h + 2, outlineColor);
     }
 
     private void renderButtonBackground(
@@ -363,9 +464,329 @@ public class TradeSelectorScreen extends Screen {
         int fillColor = hovered ? hoverFillColor : normalFillColor;
         int outlineColor = hovered ? hoverOutlineColor : normalOutlineColor;
         // Fill background
-        graphics.fill(x, y, x + w, y + h, fillColor);
+        safeFill(graphics, x, y, x + w, y + h, fillColor);
         // Draw black frame
-        graphics.renderOutline(x, y, w, h, outlineColor);
+        safeOutline(graphics, x, y, w, h, outlineColor);
+    }
+
+    private static void safeFill(GuiGraphics graphics, int left, int top, int right, int bottom, int color) {
+        if (!supportsFill) {
+            return;
+        }
+
+        try {
+            graphics.fill(left, top, right, bottom, color);
+        } catch (NoSuchMethodError ignored) {
+            supportsFill = false;
+        }
+    }
+
+    private static void safeOutline(GuiGraphics graphics, int x, int y, int width, int height, int color) {
+        if (supportsOutline) {
+            try {
+                graphics.renderOutline(x, y, width, height, color);
+                return;
+            } catch (NoSuchMethodError ignored) {
+                supportsOutline = false;
+            }
+        }
+
+        safeFill(graphics, x, y, x + width, y + 1, color);
+        safeFill(graphics, x, y + height - 1, x + width, y + height, color);
+        safeFill(graphics, x, y, x + 1, y + height, color);
+        safeFill(graphics, x + width - 1, y, x + width, y + height, color);
+    }
+
+    private static int safeDrawString(GuiGraphics graphics, Font font, String text, int x, int y, int color, boolean dropShadow) {
+        FormattedCharSequence formatted = Component.literal(text).getVisualOrderText();
+        int drawColor = withOpaqueAlpha(color);
+
+        if (supportsDrawStringWithShadow) {
+            try {
+                logTextRenderDebug("draw_string_with_shadow", "Text renderer using GuiGraphics.drawString(String, shadow)");
+                return graphics.drawString(font, text, x, y, drawColor, dropShadow);
+            } catch (NoSuchMethodError ignored) {
+                supportsDrawStringWithShadow = false;
+                logTextRenderDebug("draw_string_with_shadow_missing", "GuiGraphics.drawString(String, shadow) missing on this runtime");
+            }
+        }
+
+        if (supportsDrawStringWithoutShadow) {
+            try {
+                logTextRenderDebug("draw_string_without_shadow", "Text renderer using GuiGraphics.drawString(String)");
+                return graphics.drawString(font, text, x, y, drawColor);
+            } catch (NoSuchMethodError ignored) {
+                supportsDrawStringWithoutShadow = false;
+                logTextRenderDebug("draw_string_without_shadow_missing", "GuiGraphics.drawString(String) missing on this runtime");
+            }
+        }
+
+        if (supportsDrawFormattedWithShadow) {
+            try {
+                logTextRenderDebug("draw_formatted_with_shadow", "Text renderer using GuiGraphics.drawString(FormattedCharSequence, shadow)");
+                return graphics.drawString(font, formatted, x, y, drawColor, dropShadow);
+            } catch (NoSuchMethodError ignored) {
+                supportsDrawFormattedWithShadow = false;
+                logTextRenderDebug("draw_formatted_with_shadow_missing", "GuiGraphics.drawString(FormattedCharSequence, shadow) missing on this runtime");
+            }
+        }
+
+        if (supportsDrawFormattedWithoutShadow) {
+            try {
+                logTextRenderDebug("draw_formatted_without_shadow", "Text renderer using GuiGraphics.drawString(FormattedCharSequence)");
+                return graphics.drawString(font, formatted, x, y, drawColor);
+            } catch (NoSuchMethodError ignored) {
+                supportsDrawFormattedWithoutShadow = false;
+                logTextRenderDebug("draw_formatted_without_shadow_missing", "GuiGraphics.drawString(FormattedCharSequence) missing on this runtime");
+            }
+        }
+
+        Method fallback = resolveDrawStringFallbackMethod();
+        if (fallback != null) {
+            try {
+                Object textArg = adaptTextArg(text, fallback.getParameterTypes()[1]);
+                if (textArg != null) {
+                    Object result;
+                    if (drawStringFallbackUsesShadow) {
+                        result = fallback.invoke(graphics, font, textArg, x, y, drawColor, dropShadow);
+                    } else {
+                        result = fallback.invoke(graphics, font, textArg, x, y, drawColor);
+                    }
+
+                    if (result instanceof Integer drawnWidth) {
+                        logTextRenderDebug("draw_reflection_return_int", "Text renderer using reflection fallback (int return)");
+                        return drawnWidth;
+                    }
+
+                    logTextRenderDebug("draw_reflection_return_nonint", "Text renderer using reflection fallback (non-int return)");
+                    return font.width(text);
+                }
+            } catch (Throwable ignored) {
+                logTextRenderDebug("draw_reflection_failed", "Reflection text fallback failed at runtime");
+            }
+        }
+
+        if (supportsFontDrawInBatch) {
+            try {
+                logTextRenderDebug("draw_font_batch", "Text renderer using Font.drawInBatch fallback");
+                int rendered = font.drawInBatch(
+                        formatted,
+                        (float) x,
+                        (float) y,
+                        drawColor,
+                        dropShadow,
+                        graphics.pose().last().pose(),
+                        graphics.bufferSource(),
+                        Font.DisplayMode.NORMAL,
+                        0,
+                        15728880
+                );
+                graphics.flush();
+                return rendered;
+            } catch (NoSuchMethodError ignored) {
+                supportsFontDrawInBatch = false;
+                logTextRenderDebug("draw_font_batch_missing", "Font.drawInBatch fallback missing on this runtime");
+            } catch (Throwable ignored) {
+                logTextRenderDebug("draw_font_batch_failed", "Font.drawInBatch fallback failed at runtime");
+                return 0;
+            }
+        }
+
+        logTextRenderDebug("draw_all_paths_failed", "All TradeSelectorScreen text rendering paths failed; text will be invisible");
+        return 0;
+    }
+
+    private static Runnable pushDropdownLayer(GuiGraphics graphics) {
+        if (invokeNoArgVoid(graphics, "nextStratum")) {
+            return () -> {};
+        }
+
+        Object pose = invokeNoArgObject(graphics, "pose");
+        if (pose == null) {
+            return () -> {};
+        }
+
+        String popMethodName;
+        if (invokeNoArgVoid(pose, "pushPose")) {
+            popMethodName = "popPose";
+        } else if (invokeNoArgVoid(pose, "pushMatrix")) {
+            popMethodName = "popMatrix";
+        } else {
+            return () -> {};
+        }
+
+        invokeTranslate(pose);
+        return () -> invokeNoArgVoid(pose, popMethodName);
+    }
+
+    private static Object invokeNoArgObject(Object target, String methodName) {
+        if (target == null) {
+            return null;
+        }
+
+        try {
+            Method method = target.getClass().getMethod(methodName);
+            if (method.getParameterCount() != 0) {
+                return null;
+            }
+            return method.invoke(target);
+        } catch (ReflectiveOperationException ignored) {
+            return null;
+        }
+    }
+
+    private static boolean invokeNoArgVoid(Object target, String methodName) {
+        if (target == null) {
+            return false;
+        }
+
+        try {
+            Method method = target.getClass().getMethod(methodName);
+            if (method.getParameterCount() != 0) {
+                return false;
+            }
+            method.invoke(target);
+            return true;
+        } catch (ReflectiveOperationException ignored) {
+            return false;
+        }
+    }
+
+    private static void invokeTranslate(Object pose) {
+        try {
+            Method method = pose.getClass().getMethod("translate", double.class, double.class, double.class);
+            method.invoke(pose, 0.0, 0.0, 400.0);
+            return;
+        } catch (ReflectiveOperationException ignored) {
+        }
+
+        try {
+            Method method = pose.getClass().getMethod("translate", float.class, float.class, float.class);
+            method.invoke(pose, 0.0f, 0.0f, 400.0f);
+            return;
+        } catch (ReflectiveOperationException ignored) {
+        }
+
+        try {
+            Method method = pose.getClass().getMethod("translate", float.class, float.class);
+            method.invoke(pose, 0.0f, 0.0f);
+        } catch (ReflectiveOperationException ignored) {
+        }
+    }
+
+    private static int withOpaqueAlpha(int color) {
+        return (color & 0xFF000000) == 0 ? color | 0xFF000000 : color;
+    }
+
+    private static void logTextRenderDebug(String key, String message) {
+        if (TEXT_RENDER_DEBUG_EVENTS.add(key)) {
+            LOGGER.info("[TradeSelectorScreen/TextDebug] {}", message);
+        }
+    }
+
+    private static void safeDrawCenteredString(GuiGraphics graphics, Font font, Component text, int centerX, int y, int color) {
+        String value = text.getString();
+        int textWidth = font.width(value);
+        safeDrawString(graphics, font, value, centerX - textWidth / 2, y, color, false);
+    }
+
+    private static Object adaptTextArg(String text, Class<?> targetType) {
+        if (targetType == String.class || targetType == Object.class || targetType.isAssignableFrom(String.class)) {
+            return text;
+        }
+        if (targetType == Component.class) {
+            return Component.literal(text);
+        }
+        if (targetType.getSimpleName().contains("FormattedCharSequence")) {
+            return Component.literal(text).getVisualOrderText();
+        }
+        if (targetType.isAssignableFrom(CharSequence.class)) {
+            return text;
+        }
+        return null;
+    }
+
+    private static Method resolveDrawStringFallbackMethod() {
+        if (drawStringFallbackResolved) {
+            return drawStringFallbackMethod;
+        }
+
+        drawStringFallbackResolved = true;
+        int bestScore = Integer.MIN_VALUE;
+        for (Method method : GuiGraphics.class.getMethods()) {
+            Class<?>[] params = method.getParameterTypes();
+            if (params.length != 5 && params.length != 6) {
+                continue;
+            }
+
+            if (params[0] != Font.class || !isSupportedTextParamType(params[1])) {
+                continue;
+            }
+
+            if (params[2] != int.class || params[3] != int.class || params[4] != int.class) {
+                continue;
+            }
+
+            boolean usesShadow = params.length == 6;
+            if (usesShadow && params[5] != boolean.class) {
+                continue;
+            }
+
+            if (method.getReturnType() != int.class && method.getReturnType() != void.class) {
+                continue;
+            }
+
+            int score = drawStringMethodScore(params[1], usesShadow, method.getReturnType() == int.class);
+            if (score > bestScore) {
+                bestScore = score;
+                method.setAccessible(true);
+                drawStringFallbackMethod = method;
+                drawStringFallbackUsesShadow = usesShadow;
+            }
+        }
+
+        if (drawStringFallbackMethod != null) {
+            logTextRenderDebug(
+                    "draw_reflection_method_selected",
+                    "Selected reflection text fallback method: " + drawStringFallbackMethod
+            );
+        } else {
+            logTextRenderDebug("draw_reflection_method_missing", "No compatible reflection text fallback method found");
+        }
+
+        return drawStringFallbackMethod;
+    }
+
+    private static boolean isSupportedTextParamType(Class<?> type) {
+        return type == String.class
+                || type == Component.class
+                || type == Object.class
+                || type.isAssignableFrom(String.class)
+                || CharSequence.class.isAssignableFrom(type)
+                || type.getSimpleName().contains("FormattedCharSequence");
+    }
+
+    private static int drawStringMethodScore(Class<?> textType, boolean usesShadow, boolean returnsInt) {
+        int score = 0;
+        if (textType == String.class) {
+            score += 100;
+        } else if (textType.isAssignableFrom(String.class)) {
+            score += 90;
+        } else if (textType == Component.class) {
+            score += 80;
+        } else if (textType.isAssignableFrom(CharSequence.class)) {
+            score += 70;
+        } else {
+            score += 50;
+        }
+
+        if (usesShadow) {
+            score += 10;
+        }
+        if (returnsInt) {
+            score += 5;
+        }
+        return score;
     }
 
     private boolean contains(int mouseX, int mouseY, int left, int top, int boxWidth, int boxHeight) {
@@ -416,10 +837,10 @@ public class TradeSelectorScreen extends Screen {
 
         void renderButton(GuiGraphics graphics, int mouseX, int mouseY) {
             boolean hovered = contains(mouseX, mouseY, x, y, width, height);
-            graphics.fill(x, y, x + width, y + height, hovered ? 0xFF454545 : 0xFF353535);
-            graphics.renderOutline(x, y, width, height, open ? 0xFFFFFFFF : 0xFF8A8A8A);
-            graphics.drawString(font, trim(labeler.apply(value), width - 24), x + 6, y + 6, 0xFFFFFF, false);
-            graphics.drawString(font, open ? "^" : "v", x + width - 14, y + 6, 0xFFFFFF, false);
+            safeFill(graphics, x, y, x + width, y + height, hovered ? 0xFF454545 : 0xFF353535);
+            safeOutline(graphics, x, y, width, height, open ? 0xFFFFFFFF : 0xFF8A8A8A);
+            safeDrawString(graphics, font, trim(labeler.apply(value), width - 24), x + 6, y + 6, 0xFFFFFF, false);
+            safeDrawString(graphics, font, open ? "^" : "v", x + width - 14, y + 6, 0xFFFFFF, false);
         }
 
         void renderMenu(GuiGraphics graphics, int mouseX, int mouseY) {
@@ -427,15 +848,11 @@ public class TradeSelectorScreen extends Screen {
                 return;
             }
 
-            graphics.flush();
-            graphics.pose().pushPose();
-            graphics.pose().translate(0.0f, 0.0f, 300.0f);
             int visible = Math.min(MAX_VISIBLE_OPTIONS, values.size());
             int listHeight = visible * OPTION_HEIGHT;
             int listY = y + height + 1;
-            graphics.fill(x, listY, x + width, listY + listHeight, 0xFF242424);
-            graphics.renderOutline(x, listY, width, listHeight, 0xFFFFFFFF);
-            graphics.enableScissor(x, listY, x + width, listY + listHeight);
+            safeFill(graphics, x, listY, x + width, listY + listHeight, 0xFF242424);
+            safeOutline(graphics, x, listY, width, listHeight, 0xFFFFFFFF);
             for (int row = 0; row < visible; row++) {
                 int index = scrollIndex + row;
                 if (index >= values.size()) {
@@ -446,13 +863,10 @@ public class TradeSelectorScreen extends Screen {
                 T option = values.get(index);
                 boolean rowHovered = contains(mouseX, mouseY, x, rowY, width, OPTION_HEIGHT);
                 if (rowHovered || option.equals(value)) {
-                    graphics.fill(x + 1, rowY + 1, x + width - 1, rowY + OPTION_HEIGHT - 1, rowHovered ? 0xFF555555 : 0xFF3C4E63);
+                    safeFill(graphics, x + 1, rowY + 1, x + width - 1, rowY + OPTION_HEIGHT - 1, rowHovered ? 0xFF555555 : 0xFF3C4E63);
                 }
-                graphics.drawString(font, trim(labeler.apply(option), width - 12), x + 6, rowY + 5, 0xFFFFFF, false);
+                safeDrawString(graphics, font, trim(labeler.apply(option), width - 12), x + 6, rowY + 5, 0xFFFFFF, false);
             }
-            graphics.disableScissor();
-            graphics.pose().popPose();
-            graphics.flush();
         }
 
         boolean mouseClicked(double mouseX, double mouseY, int button) {

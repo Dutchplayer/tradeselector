@@ -103,4 +103,8 @@ public class TradeRerollModClient implements ClientModInitializer {
     public static AutomationStateMachine getStateMachine() {
         return stateMachine;
     }
+
+    public static boolean shouldOverrideInactiveFpsLimit() {
+        return stateMachine != null && stateMachine.shouldOverrideInactiveFpsLimit();
+    }
 }

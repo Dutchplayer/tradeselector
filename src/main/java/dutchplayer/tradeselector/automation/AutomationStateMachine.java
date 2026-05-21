@@ -11,7 +11,6 @@ import net.minecraft.core.Direction;
 import net.minecraft.sounds.SoundEvent;
 import net.minecraft.sounds.SoundEvents;
 import net.minecraft.world.InteractionHand;
-import net.minecraft.world.InteractionResult;
 import net.minecraft.world.entity.npc.Villager;
 import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.item.ItemStack;
@@ -22,6 +21,12 @@ import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.Vec3;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.util.ArrayList;
+import java.util.List;
 
 public class AutomationStateMachine {
     private static final Logger LOGGER = LoggerFactory.getLogger("TradeSelector");
@@ -44,6 +49,8 @@ public class AutomationStateMachine {
     private static final double RECOVERY_RETURN_STOP_DISTANCE_BLOCKS = 0.20;
     private static final int RECOVERY_RETURN_SETTLE_TICKS = 2;
     private static final float SCAN_LOOK_DRIFT_TOLERANCE_DEGREES = 2.0f;
+    private static Field inventorySelectedSlotField;
+    private static boolean inventorySelectedSlotFieldResolved;
 
     private final ModState modState;
     private final VillagerBinder villagerBinder;
@@ -76,6 +83,10 @@ public class AutomationStateMachine {
     private int breakRetryDelayTicks;
     private int breakTimeoutRetryCount;
     private int slotSyncDelayTicks;
+    private boolean pausedForFocusLoss;
+    private Object originalInactivityFpsLimit;
+    private Object inactivityFpsOption;
+    private boolean fpsLimitOverrideActive;
 
     public AutomationStateMachine(ModState modState, VillagerBinder villagerBinder, TradeScanner tradeScanner) {
         this.modState = modState;
@@ -87,6 +98,19 @@ public class AutomationStateMachine {
     public void tick() {
         if (!modState.isRunning()) {
             return;
+        }
+
+        if (shouldPauseForLostFocus()) {
+            enterLostFocusPauseIfNeeded();
+            return;
+        }
+
+        if (pausedForFocusLoss) {
+            pausedForFocusLoss = false;
+            actionTimer = 0;
+            if (client.player != null) {
+                PlayerMessages.send(client.player, "Automation resumed");
+            }
         }
 
         String movementFailMessage = movementInputFailMessage();
@@ -146,6 +170,8 @@ public class AutomationStateMachine {
         precheckPending = true;
         resetPlacementTracking();
         originalSelectedHotbarSlot = -1;
+        pausedForFocusLoss = false;
+        fpsLimitOverrideActive = true;
         LOGGER.info("Automation started (precheck first)");
         return true;
     }
@@ -162,7 +188,13 @@ public class AutomationStateMachine {
         resetPlacementTracking();
         stopRecoveryMovement();
         stopScanLookMonitor();
+        pausedForFocusLoss = false;
+        fpsLimitOverrideActive = false;
         LOGGER.info("Automation stopped");
+    }
+
+    public boolean shouldOverrideInactiveFpsLimit() {
+        return fpsLimitOverrideActive && modState.isRunning();
     }
 
     private void handleBoundState() {
@@ -313,13 +345,13 @@ public class AutomationStateMachine {
         recoveryMoveAttemptedThisCycle = false;
 
         if (originalSelectedHotbarSlot == -1) {
-            originalSelectedHotbarSlot = inventory.selected;
+            originalSelectedHotbarSlot = getSelectedHotbarSlot(inventory);
         }
 
         boolean switchedSlot = false;
         if (Inventory.isHotbarSlot(lecternSlot)) {
-            if (inventory.selected != lecternSlot) {
-                inventory.selected = lecternSlot;
+            if (getSelectedHotbarSlot(inventory) != lecternSlot) {
+                setSelectedHotbarSlot(inventory, lecternSlot);
                 switchedSlot = true;
             }
         } else {
@@ -341,7 +373,7 @@ public class AutomationStateMachine {
 
         BlockPos supportPos = lecternPos.below();
         lookAt(Vec3.atCenterOf(lecternPos));
-        InteractionResult placeResult = client.gameMode.useItemOn(
+        client.gameMode.useItemOn(
                 client.player,
                 InteractionHand.MAIN_HAND,
                 new BlockHitResult(Vec3.atCenterOf(supportPos), Direction.UP, supportPos, false)
@@ -351,11 +383,6 @@ public class AutomationStateMachine {
         placeRetryCount++;
         if (placeRetryCount > MAX_PLACE_RETRIES) {
             fail("Failed to place lectern after " + MAX_PLACE_RETRIES + " retries");
-            return;
-        }
-
-        if (!placeResult.consumesAction()) {
-            placeRetryDelayTicks = PLACE_RETRY_DELAY_TICKS;
             return;
         }
 
@@ -473,6 +500,8 @@ public class AutomationStateMachine {
     }
 
     private void handleFoundMatch() {
+        refreshMerchantOffersForFoundMatch();
+
         if (client.player != null) {
             PlayerMessages.send(client.player, "Found matching trade");
             SoundEvent sound = successSound();
@@ -497,6 +526,25 @@ public class AutomationStateMachine {
 
     private void handleError() {
         stop();
+    }
+
+    private void refreshMerchantOffersForFoundMatch() {
+        if (client.player == null || client.gameMode == null) {
+            return;
+        }
+
+        Villager villager = villagerBinder.getBoundVillager();
+        if (villager == null) {
+            return;
+        }
+
+        if (client.screen instanceof MerchantScreen) {
+            client.player.closeContainer();
+        }
+
+        lookAt(villager.getEyePosition());
+        client.gameMode.interact(client.player, villager, InteractionHand.MAIN_HAND);
+        client.player.swing(InteractionHand.MAIN_HAND);
     }
 
     private int findLecternSlot(Inventory inventory) {
@@ -678,32 +726,307 @@ public class AutomationStateMachine {
         return null;
     }
 
-    private boolean isToggleSprintEnabled() {
-        return isToggleOptionEnabled("toggleSprint");
-    }
-
-    private boolean isToggleSneakEnabled() {
-        return isToggleOptionEnabled("toggleCrouch") || isToggleOptionEnabled("toggleSneak");
-    }
-
-    private boolean isToggleOptionEnabled(String optionName) {
+    private Object invokeOptionsAccessorNoArgs(String... accessorNames) {
         if (client.options == null) {
+            return null;
+        }
+
+        for (String accessorName : accessorNames) {
+            try {
+                return client.options.getClass().getMethod(accessorName).invoke(client.options);
+            } catch (ReflectiveOperationException ignored) {
+            }
+        }
+
+        return null;
+    }
+
+    private Object findLikelyInactivityFpsLimitOption() {
+        List<Object> candidates = allOptionLikeCandidates();
+        for (Object candidate : candidates) {
+            Object value = readOptionValue(candidate);
+            if (!(value instanceof Enum<?> enumValue)) {
+                continue;
+            }
+
+            Object[] constants = enumValue.getDeclaringClass().getEnumConstants();
+            if (constants == null || constants.length < 2) {
+                continue;
+            }
+
+            int minFps = Integer.MAX_VALUE;
+            int maxFps = Integer.MIN_VALUE;
+            int measured = 0;
+            for (Object constant : constants) {
+                Integer fps = readInactivityFpsCandidate(constant);
+                if (fps == null) {
+                    continue;
+                }
+                measured++;
+                minFps = Math.min(minFps, fps);
+                maxFps = Math.max(maxFps, fps);
+            }
+
+            if (measured >= 2 && minFps <= 15 && maxFps >= 30) {
+                return candidate;
+            }
+        }
+
+        return null;
+    }
+
+    private Object findLikelyFramerateLimitOption() {
+        List<Object> candidates = allOptionLikeCandidates();
+        Object best = null;
+        int bestFps = Integer.MIN_VALUE;
+        for (Object candidate : candidates) {
+            Object value = readOptionValue(candidate);
+            if (!(value instanceof Number number)) {
+                continue;
+            }
+
+            int fps = number.intValue();
+            if (fps > bestFps) {
+                bestFps = fps;
+                best = candidate;
+            }
+        }
+
+        return best;
+    }
+
+    private List<Object> allOptionLikeCandidates() {
+        List<Object> candidates = new ArrayList<>();
+        if (client.options == null) {
+            return candidates;
+        }
+
+        for (Method method : client.options.getClass().getMethods()) {
+            if (Modifier.isStatic(method.getModifiers()) || method.getParameterCount() != 0 || method.getReturnType() == void.class) {
+                continue;
+            }
+
+            try {
+                Object candidate = method.invoke(client.options);
+                if (isOptionLikeCandidate(candidate)) {
+                    candidates.add(candidate);
+                }
+            } catch (ReflectiveOperationException ignored) {
+            }
+        }
+
+        for (Field field : client.options.getClass().getFields()) {
+            if (Modifier.isStatic(field.getModifiers())) {
+                continue;
+            }
+
+            try {
+                Object candidate = field.get(client.options);
+                if (isOptionLikeCandidate(candidate)) {
+                    candidates.add(candidate);
+                }
+            } catch (ReflectiveOperationException ignored) {
+            }
+        }
+
+        return candidates;
+    }
+
+    private boolean isOptionLikeCandidate(Object candidate) {
+        if (candidate == null) {
             return false;
         }
 
+        return isSimpleOptionValue(readOptionValue(candidate));
+    }
+
+    private Object pauseOnLostFocusOption() {
+        if (client.options == null) {
+            return null;
+        }
+
+        Object option = invokeOptionsAccessorNoArgs("pauseOnLostFocus", "pauseWhenUnfocused");
+        if (option != null) {
+            return option;
+        }
+
+        return getOption("pauseOnLostFocus");
+    }
+
+    private Object inactivityFpsLimitOption() {
+        if (client.options == null) {
+            return null;
+        }
+
+        Object option = invokeOptionsAccessorNoArgs("inactivityFpsLimit", "afkFpsLimit", "inactiveFpsLimit");
+        if (option != null) {
+            return option;
+        }
+
+        option = getOption("inactivityFpsLimit");
+        if (option != null) {
+            return option;
+        }
+
+        return findLikelyInactivityFpsLimitOption();
+    }
+
+    private Object framerateLimitOption() {
+        if (client.options == null) {
+            return null;
+        }
+
+        Object option = invokeOptionsAccessorNoArgs("framerateLimit", "maxFps");
+        if (option != null) {
+            return option;
+        }
+
+        option = getOption("framerateLimit");
+        if (option != null) {
+            return option;
+        }
+
+        return findLikelyFramerateLimitOption();
+    }
+
+    private Object toggleSprintOption() {
+        if (client.options == null) {
+            return null;
+        }
+
+        Object option = invokeOptionsAccessorNoArgs("toggleSprint");
+        if (option != null) {
+            return option;
+        }
+
+        return getOption("toggleSprint");
+    }
+
+    private Object toggleCrouchOption() {
+        if (client.options == null) {
+            return null;
+        }
+
+        Object option = invokeOptionsAccessorNoArgs("toggleCrouch", "toggleSneak");
+        if (option != null) {
+            return option;
+        }
+
+        return getOption("toggleCrouch");
+    }
+
+    private Object toggleSneakOption() {
+        if (client.options == null) {
+            return null;
+        }
+
+        Object option = invokeOptionsAccessorNoArgs("toggleSneak", "toggleCrouch");
+        if (option != null) {
+            return option;
+        }
+
+        return getOption("toggleSneak");
+    }
+
+    private boolean shouldPauseForLostFocus() {
+        return isPauseOnLostFocusEnabled() && !isWindowActive();
+    }
+
+    private void enterLostFocusPauseIfNeeded() {
+        if (pausedForFocusLoss) {
+            return;
+        }
+
+        pausedForFocusLoss = true;
+        actionTimer = 0;
+        stopDestroyAction();
+        setRecoveryMovementKeys(false, false);
+        if (client.player != null) {
+            PlayerMessages.send(client.player, "Automation paused while game is unfocused");
+        }
+    }
+
+    private boolean isPauseOnLostFocusEnabled() {
+        return readBooleanOption(pauseOnLostFocusOption());
+    }
+
+    private boolean isWindowActive() {
         try {
-            Object option = client.options.getClass().getMethod(optionName).invoke(client.options);
-            return readBooleanOption(option);
+            Method method = client.getClass().getMethod("isWindowActive");
+            Object value = method.invoke(client);
+            return value instanceof Boolean active ? active : true;
         } catch (ReflectiveOperationException ignored) {
         }
 
         try {
-            Object option = client.options.getClass().getField(optionName).get(client.options);
-            return readBooleanOption(option);
+            Method method = client.getClass().getMethod("isWindowFocused");
+            Object value = method.invoke(client);
+            return value instanceof Boolean active ? active : true;
         } catch (ReflectiveOperationException ignored) {
         }
 
-        return false;
+        return true;
+    }
+
+    private boolean isToggleSprintEnabled() {
+        return readBooleanOption(toggleSprintOption());
+    }
+
+    private boolean isToggleSneakEnabled() {
+        return readBooleanOption(toggleCrouchOption()) || readBooleanOption(toggleSneakOption());
+    }
+
+    private Object getOption(String optionName) {
+        if (client.options == null) {
+            return null;
+        }
+
+        try {
+            return client.options.getClass().getMethod(optionName).invoke(client.options);
+        } catch (ReflectiveOperationException ignored) {
+        }
+
+        try {
+            return client.options.getClass().getField(optionName).get(client.options);
+        } catch (ReflectiveOperationException ignored) {
+        }
+
+        return null;
+    }
+
+    private void applyAutomationFpsLimitOverride() {
+        Object option = inactivityFpsLimitOption();
+        Object currentValue = readOptionValue(option);
+
+        if (option == null || currentValue == null) {
+            LOGGER.info("Automation FPS override skipped: inactivity option not resolved");
+            return;
+        }
+
+        Object overrideValue = bestNoThrottleInactivityFpsValue(currentValue);
+        if (overrideValue == null || overrideValue.equals(currentValue)) {
+            LOGGER.info("Automation FPS override skipped: no better inactivity value found (current={})", currentValue);
+            return;
+        }
+
+        if (setOptionValue(option, overrideValue)) {
+            inactivityFpsOption = option;
+            originalInactivityFpsLimit = currentValue;
+            LOGGER.info("Automation FPS override applied: {} -> {}", currentValue, overrideValue);
+            return;
+        }
+
+        LOGGER.info("Automation FPS override failed: setter invocation did not succeed");
+    }
+
+    private void restoreAutomationFpsLimitOverride() {
+        if (inactivityFpsOption == null || originalInactivityFpsLimit == null) {
+            return;
+        }
+
+        setOptionValue(inactivityFpsOption, originalInactivityFpsLimit);
+        inactivityFpsOption = null;
+        originalInactivityFpsLimit = null;
     }
 
     private void startScanLookMonitor() {
@@ -745,27 +1068,318 @@ public class AutomationStateMachine {
     }
 
     private boolean readBooleanOption(Object optionInstance) {
+        Object value = readOptionValue(optionInstance);
+        return value instanceof Boolean bool && bool;
+    }
+
+    private Object readOptionValue(Object optionInstance) {
         if (optionInstance == null) {
+            return null;
+        }
+
+        if (optionInstance instanceof Boolean) {
+            return optionInstance;
+        }
+
+        if (optionInstance.getClass().isEnum()) {
+            return optionInstance;
+        }
+
+        if (optionInstance instanceof Number || optionInstance instanceof CharSequence) {
+            return optionInstance;
+        }
+
+        Object value = invokeOptionGetterByName(optionInstance, "get", "getValue");
+        if (isSimpleOptionValue(value)) {
+            return value;
+        }
+
+        value = invokeOptionGetterHeuristic(optionInstance);
+        if (isSimpleOptionValue(value)) {
+            return value;
+        }
+
+        value = readOptionValueFromFields(optionInstance);
+        if (isSimpleOptionValue(value)) {
+            return value;
+        }
+
+        return null;
+    }
+
+    private boolean setOptionValue(Object optionInstance, Object value) {
+        if (optionInstance == null || value == null) {
             return false;
         }
 
-        if (optionInstance instanceof Boolean booleanValue) {
-            return booleanValue;
+        for (Method method : optionInstance.getClass().getMethods()) {
+            if (Modifier.isStatic(method.getModifiers()) || method.getReturnType() != void.class) {
+                continue;
+            }
+
+            if (!(method.getName().equals("set") || method.getName().equals("setValue")) || method.getParameterCount() != 1) {
+                continue;
+            }
+
+            Class<?> parameterType = method.getParameterTypes()[0];
+            if (!isAssignableForOptionSet(parameterType, value)) {
+                continue;
+            }
+
+            try {
+                method.invoke(optionInstance, value);
+                Object newValue = readOptionValue(optionInstance);
+                if (newValue != null && newValue.equals(value)) {
+                    return true;
+                }
+            } catch (ReflectiveOperationException ignored) {
+            }
         }
 
-        try {
-            Object value = optionInstance.getClass().getMethod("get").invoke(optionInstance);
-            return value instanceof Boolean booleanValue && booleanValue;
-        } catch (ReflectiveOperationException ignored) {
+        for (Method method : optionInstance.getClass().getMethods()) {
+            if (Modifier.isStatic(method.getModifiers()) || method.getReturnType() != void.class || method.getParameterCount() != 1) {
+                continue;
+            }
+
+            Class<?> parameterType = method.getParameterTypes()[0];
+            if (!isAssignableForOptionSet(parameterType, value)) {
+                continue;
+            }
+
+            try {
+                method.invoke(optionInstance, value);
+                Object newValue = readOptionValue(optionInstance);
+                if (newValue != null && newValue.equals(value)) {
+                    return true;
+                }
+            } catch (ReflectiveOperationException ignored) {
+            }
         }
 
-        try {
-            Object value = optionInstance.getClass().getMethod("getValue").invoke(optionInstance);
-            return value instanceof Boolean booleanValue && booleanValue;
-        } catch (ReflectiveOperationException ignored) {
+        return setOptionValueByField(optionInstance, value);
+    }
+
+    private Object invokeOptionGetterByName(Object optionInstance, String... names) {
+        for (String name : names) {
+            try {
+                Method method = optionInstance.getClass().getMethod(name);
+                if (Modifier.isStatic(method.getModifiers()) || method.getParameterCount() != 0) {
+                    continue;
+                }
+
+                Object result = method.invoke(optionInstance);
+                if (isSimpleOptionValue(result)) {
+                    return result;
+                }
+            } catch (ReflectiveOperationException ignored) {
+            }
+        }
+
+        return null;
+    }
+
+    private Object invokeOptionGetterHeuristic(Object optionInstance) {
+        for (Method method : optionInstance.getClass().getMethods()) {
+            if (Modifier.isStatic(method.getModifiers()) || method.getParameterCount() != 0 || method.getReturnType() == void.class) {
+                continue;
+            }
+
+            if (method.getDeclaringClass() == Object.class) {
+                continue;
+            }
+
+            if (method.getName().equals("hashCode") || method.getName().equals("toString") || method.getName().equals("getClass")) {
+                continue;
+            }
+
+            try {
+                Object result = method.invoke(optionInstance);
+                if (isSimpleOptionValue(result)) {
+                    return result;
+                }
+            } catch (ReflectiveOperationException ignored) {
+            }
+        }
+
+        return null;
+    }
+
+    private Object readOptionValueFromFields(Object optionInstance) {
+        Class<?> type = optionInstance.getClass();
+        while (type != null && type != Object.class) {
+            for (Field field : type.getDeclaredFields()) {
+                if (Modifier.isStatic(field.getModifiers())) {
+                    continue;
+                }
+
+                try {
+                    field.setAccessible(true);
+                    Object fieldValue = field.get(optionInstance);
+                    if (isSimpleOptionValue(fieldValue)) {
+                        return fieldValue;
+                    }
+                } catch (ReflectiveOperationException ignored) {
+                }
+            }
+            type = type.getSuperclass();
+        }
+
+        return null;
+    }
+
+    private boolean setOptionValueByField(Object optionInstance, Object value) {
+        Class<?> type = optionInstance.getClass();
+        while (type != null && type != Object.class) {
+            for (Field field : type.getDeclaredFields()) {
+                if (Modifier.isStatic(field.getModifiers()) || Modifier.isFinal(field.getModifiers())) {
+                    continue;
+                }
+
+                if (!isAssignableForOptionSet(field.getType(), value)) {
+                    continue;
+                }
+
+                try {
+                    field.setAccessible(true);
+                    field.set(optionInstance, value);
+                    Object newValue = readOptionValue(optionInstance);
+                    if (newValue != null && newValue.equals(value)) {
+                        return true;
+                    }
+                } catch (ReflectiveOperationException ignored) {
+                }
+            }
+            type = type.getSuperclass();
         }
 
         return false;
+    }
+
+    private boolean isSimpleOptionValue(Object value) {
+        return value instanceof Boolean
+                || value instanceof Number
+                || value instanceof CharSequence
+                || (value != null && value.getClass().isEnum());
+    }
+
+    private boolean isAssignableForOptionSet(Class<?> parameterType, Object value) {
+        if (value == null) {
+            return !parameterType.isPrimitive();
+        }
+
+        if (parameterType.isInstance(value)) {
+            return true;
+        }
+
+        if (parameterType.isPrimitive()) {
+            Class<?> boxed = boxType(parameterType);
+            return boxed != null && boxed.isInstance(value);
+        }
+
+        return false;
+    }
+
+    private Class<?> boxType(Class<?> primitive) {
+        if (primitive == boolean.class) {
+            return Boolean.class;
+        }
+        if (primitive == byte.class) {
+            return Byte.class;
+        }
+        if (primitive == short.class) {
+            return Short.class;
+        }
+        if (primitive == int.class) {
+            return Integer.class;
+        }
+        if (primitive == long.class) {
+            return Long.class;
+        }
+        if (primitive == float.class) {
+            return Float.class;
+        }
+        if (primitive == double.class) {
+            return Double.class;
+        }
+        if (primitive == char.class) {
+            return Character.class;
+        }
+        return null;
+    }
+
+    private Object bestNoThrottleInactivityFpsValue(Object currentValue) {
+        if (currentValue instanceof Number currentNumber) {
+            Object target = readOptionValue(framerateLimitOption());
+            if (target instanceof Number targetNumber && targetNumber.intValue() > currentNumber.intValue()) {
+                return targetNumber;
+            }
+            return currentValue;
+        }
+
+        if (!(currentValue instanceof Enum<?> enumValue)) {
+            return null;
+        }
+
+        Class<?> enumClass = enumValue.getDeclaringClass();
+        Object[] constants = enumClass.getEnumConstants();
+        if (constants == null || constants.length == 0) {
+            return null;
+        }
+
+        for (Object constant : constants) {
+            String name = ((Enum<?>) constant).name().toLowerCase();
+            if (name.contains("off") || name.contains("none") || name.contains("disable") || name.contains("unlimit") || name.contains("max")) {
+                return constant;
+            }
+        }
+
+        Object bestByName = null;
+        for (Object constant : constants) {
+            String name = ((Enum<?>) constant).name().toLowerCase();
+            if (name.contains("afk") || name.contains("inactive") || name.contains("minimized") || name.contains("low") || name.contains("battery")) {
+                continue;
+            }
+            bestByName = constant;
+        }
+        if (bestByName != null) {
+            return bestByName;
+        }
+
+        int bestFps = Integer.MIN_VALUE;
+        Object best = currentValue;
+        for (Object constant : constants) {
+            Integer fps = readInactivityFpsCandidate(constant);
+            if (fps != null && fps > bestFps) {
+                bestFps = fps;
+                best = constant;
+            }
+        }
+
+        return best;
+    }
+
+    private Integer readInactivityFpsCandidate(Object value) {
+        if (value == null) {
+            return null;
+        }
+
+        String[] methodCandidates = new String[] {"getValue", "getFpsLimit", "fpsLimit", "value"};
+        for (String methodName : methodCandidates) {
+            try {
+                Method method = value.getClass().getMethod(methodName);
+                if (method.getParameterCount() != 0) {
+                    continue;
+                }
+
+                Object result = method.invoke(value);
+                if (result instanceof Number number) {
+                    return number.intValue();
+                }
+            } catch (ReflectiveOperationException ignored) {
+            }
+        }
+
+        return null;
     }
 
     private void restoreSelectedHotbarSlot() {
@@ -774,10 +1388,84 @@ public class AutomationStateMachine {
         }
 
         if (Inventory.isHotbarSlot(originalSelectedHotbarSlot)) {
-            client.player.getInventory().selected = originalSelectedHotbarSlot;
+            setSelectedHotbarSlot(client.player.getInventory(), originalSelectedHotbarSlot);
         }
 
         originalSelectedHotbarSlot = -1;
+    }
+
+    private int getSelectedHotbarSlot(Inventory inventory) {
+        if (inventory == null) {
+            return -1;
+        }
+
+        Field selectedField = resolveInventorySelectedSlotField(inventory);
+        if (selectedField == null) {
+            return -1;
+        }
+
+        try {
+            int slot = selectedField.getInt(inventory);
+            return Inventory.isHotbarSlot(slot) ? slot : -1;
+        } catch (IllegalAccessException ignored) {
+            return -1;
+        }
+    }
+
+    private void setSelectedHotbarSlot(Inventory inventory, int slot) {
+        if (inventory == null || !Inventory.isHotbarSlot(slot)) {
+            return;
+        }
+
+        Field selectedField = resolveInventorySelectedSlotField(inventory);
+        if (selectedField == null) {
+            return;
+        }
+
+        try {
+            selectedField.setInt(inventory, slot);
+        } catch (IllegalAccessException ignored) {
+        }
+    }
+
+    private Field resolveInventorySelectedSlotField(Inventory inventory) {
+        if (inventorySelectedSlotFieldResolved) {
+            return inventorySelectedSlotField;
+        }
+
+        inventorySelectedSlotFieldResolved = true;
+        Class<?> inventoryClass = inventory.getClass();
+
+        String[] candidateNames = new String[] {"selected", "selectedSlot", "field_7545"};
+        for (String candidateName : candidateNames) {
+            try {
+                Field candidate = inventoryClass.getDeclaredField(candidateName);
+                if (candidate.getType() == int.class) {
+                    candidate.setAccessible(true);
+                    inventorySelectedSlotField = candidate;
+                    return candidate;
+                }
+            } catch (ReflectiveOperationException ignored) {
+            }
+        }
+
+        for (Field field : inventoryClass.getDeclaredFields()) {
+            if (field.getType() != int.class) {
+                continue;
+            }
+
+            String name = field.getName().toLowerCase();
+            if (name.contains("selected") || name.contains("slot")) {
+                try {
+                    field.setAccessible(true);
+                    inventorySelectedSlotField = field;
+                    return field;
+                } catch (Exception ignored) {
+                }
+            }
+        }
+
+        return null;
     }
 
     private void lookAt(Vec3 target) {
@@ -814,6 +1502,8 @@ public class AutomationStateMachine {
         restoreSelectedHotbarSlot();
         resetPlacementTracking();
         stopScanLookMonitor();
+        pausedForFocusLoss = false;
+        fpsLimitOverrideActive = false;
         String baseMessage = message == null || message.isBlank() ? "Unknown automation error" : message;
         String contextMessage = "[TradeSelector] " + baseMessage;
         modState.setErrorMessage(contextMessage);
