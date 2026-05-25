@@ -5,6 +5,8 @@ import dutchplayer.tradeselector.config.ConfigManager;
 import dutchplayer.tradeselector.config.ModConfig;
 import dutchplayer.tradeselector.util.PlayerMessages;
 import net.fabricmc.fabric.api.client.screen.v1.ScreenMouseEvents;
+import net.fabricmc.fabric.api.event.Event;
+import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.gui.Font;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.components.AbstractWidget;
@@ -16,7 +18,10 @@ import net.minecraft.util.FormattedCharSequence;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashSet;
@@ -40,6 +45,7 @@ public class TradeSelectorScreen extends Screen {
     private static Method drawStringFallbackMethod;
     private static boolean drawStringFallbackUsesShadow;
     private static final Set<String> TEXT_RENDER_DEBUG_EVENTS = new HashSet<>();
+    private static final Set<String> DROPDOWN_DEBUG_EVENTS = new HashSet<>();
 
     private Dropdown<String> enchantmentDropdown;
     private Button levelModeButton;
@@ -47,12 +53,12 @@ public class TradeSelectorScreen extends Screen {
     private Dropdown<ModConfig.SuccessSound> successSoundDropdown;
     private Button lecternRecoveryWalkButton;
     private boolean lecternRecoveryWalkEnabled;
-    private boolean mouseBridgeRegistered;
     private EditBox exactLevelField;
     private EditBox minLevelField;
     private EditBox maxLevelField;
     private EditBox maxPriceField;
     private Button saveButton;
+    private boolean modernMouseBridgeActive;
 
     private final TradeScanner tradeScanner = new TradeScanner();
 
@@ -134,8 +140,8 @@ public class TradeSelectorScreen extends Screen {
                 .bounds(panelX + 20, panelY + 204, 290, 20)
                 .build();
         addRenderableWidget(saveButton);
+        modernMouseBridgeActive = DropdownRenderCompatHelper.registerModernMouseBridge(this);
 
-        registerDropdownMouseBridge();
         updateLevelFieldsVisibility();
         clampLevelFieldsToSelectedEnchantment();
     }
@@ -156,7 +162,8 @@ public class TradeSelectorScreen extends Screen {
     public void render(GuiGraphics graphics, int mouseX, int mouseY, float delta) {
         int panelX = (this.width - PANEL_WIDTH) / 2;
         int panelY = (this.height - PANEL_HEIGHT) / 2;
-        
+        boolean dropdownOpen = enchantmentDropdown.isOpen() || successSoundDropdown.isOpen();
+
         safeFill(graphics, panelX, panelY, panelX + PANEL_WIDTH, panelY + PANEL_HEIGHT, 0xFF202020);
         safeOutline(graphics, panelX, panelY, PANEL_WIDTH, PANEL_HEIGHT, 0xFF707070);
 
@@ -164,12 +171,10 @@ public class TradeSelectorScreen extends Screen {
         renderEditBoxBackground(graphics, minLevelField, mouseX, mouseY, 0xFF606666, 0xFF707777, 0xFF000000, 0xFF8A8A8A);
         renderEditBoxBackground(graphics, maxLevelField, mouseX, mouseY, 0xFF606666, 0xFF707777, 0xFF000000, 0xFF8A8A8A);
         renderEditBoxBackground(graphics, maxPriceField, mouseX, mouseY, 0xFF606666, 0xFF707777, 0xFF000000, 0xFF8A8A8A);
-        renderButtonBackground(graphics, levelModeButton, 0xFF353535, 0xFF454545, 0xFF8A8A8A, 0xFFFFFFFF, false);
-        renderButtonBackground(graphics, lecternRecoveryWalkButton, 0xFF353535, 0xFF454545, 0xFF8A8A8A, 0xFFFFFFFF, false);
+        renderButtonBackground(graphics, levelModeButton, 0xFF353535, 0xFF454545, 0xFF8A8A8A, 0xFFFFFFFF, dropdownOpen);
+        renderButtonBackground(graphics, lecternRecoveryWalkButton, 0xFF353535, 0xFF454545, 0xFF8A8A8A, 0xFFFFFFFF, dropdownOpen);
         renderButtonBackground(graphics, saveButton, 0xFF353535, 0xFF454545, 0xFF8A8A8A, 0xFFFFFFFF,
-                enchantmentDropdown.isOpen() || successSoundDropdown.isOpen());
-
-        super.render(graphics, mouseX, mouseY, delta);
+                dropdownOpen);
 
         safeDrawCenteredString(graphics, this.font, this.title, this.width / 2, panelY + 10, 0xFFFFFF);
         safeDrawString(graphics, this.font, "Enchantment", panelX + 20, panelY + 38, 0xCCCCCC, false);
@@ -179,17 +184,54 @@ public class TradeSelectorScreen extends Screen {
         safeDrawString(graphics, this.font, "Success Sound", panelX + 20, panelY + 158, 0xCCCCCC, false);
         safeDrawString(graphics, this.font, "Recovery Walk", panelX + 20, panelY + 188, 0xCCCCCC, false);
 
-        enchantmentDropdown.renderButton(graphics, mouseX, mouseY);
-        successSoundDropdown.renderButton(graphics, mouseX, mouseY);
-        renderDropdownMenus(graphics, mouseX, mouseY);
+        DropdownRenderCompatHelper.renderWidgetsAndDropdownOverlay(
+                this,
+                graphics,
+                mouseX,
+                mouseY,
+                delta,
+                dropdownOpen,
+                () -> {
+                    enchantmentDropdown.renderButton(graphics, mouseX, mouseY);
+                    successSoundDropdown.renderButton(graphics, mouseX, mouseY);
+                    renderDropdownMenus(graphics, mouseX, mouseY);
+                },
+                exactLevelField,
+                minLevelField,
+                maxLevelField,
+                maxPriceField,
+                levelModeButton,
+                lecternRecoveryWalkButton,
+                saveButton
+        );
+    }
+
+    private void renderVanillaWidgets(GuiGraphics graphics, int mouseX, int mouseY, float delta) {
+        super.render(graphics, mouseX, mouseY, delta);
     }
 
     @Override
     public boolean mouseClicked(double mouseX, double mouseY, int button) {
+        logDropdownDebug("mouseClicked entry x={} y={} button={}", mouseX, mouseY, button);
+
+        if (modernMouseBridgeActive) {
+            boolean handledBySuper = super.mouseClicked(mouseX, mouseY, button);
+            logDropdownDebug("mouseClicked modern-bridge mode delegated to super, handledBySuper={}", handledBySuper);
+            return handledBySuper;
+        }
+
         if (handleDropdownMouseClick(mouseX, mouseY, button)) {
+            logDropdownDebug(
+                    "mouseClicked handled by dropdown layer (enchantOpen={}, successOpen={})",
+                    enchantmentDropdown.isOpen(),
+                    successSoundDropdown.isOpen()
+            );
             return true;
         }
-        return super.mouseClicked(mouseX, mouseY, button);
+
+        boolean handledBySuper = super.mouseClicked(mouseX, mouseY, button);
+        logDropdownDebug("mouseClicked delegated to super, handledBySuper={}", handledBySuper);
+        return handledBySuper;
     }
 
     @Override
@@ -218,49 +260,49 @@ public class TradeSelectorScreen extends Screen {
     }
 
     @Override
-    public void tick() {
-    }
-
-    @Override
     public boolean isPauseScreen() {
         return false;
-    }
-
-    private void registerDropdownMouseBridge() {
-        if (mouseBridgeRegistered) {
-            return;
-        }
-
-        mouseBridgeRegistered = true;
-        ScreenMouseEvents.allowMouseClick(this).register((screen, mouseX, mouseY, button) -> {
-            if (screen != this) {
-                return true;
-            }
-            return !handleDropdownMouseClick(mouseX, mouseY, button);
-        });
     }
 
     private boolean handleDropdownMouseClick(double mouseX, double mouseY, int button) {
         boolean wasEnchantmentOpen = enchantmentDropdown.isOpen();
         boolean wasSuccessSoundOpen = successSoundDropdown.isOpen();
 
-        if (enchantmentDropdown.mouseClicked(mouseX, mouseY, button)) {
+        logDropdownDebug(
+                "handleDropdownMouseClick start button={} x={} y={} wasEnchantOpen={} wasSuccessOpen={}",
+                button,
+                mouseX,
+                mouseY,
+                wasEnchantmentOpen,
+                wasSuccessSoundOpen
+        );
+
+        boolean enchantmentHandled = enchantmentDropdown.mouseClicked(mouseX, mouseY, button);
+        logDropdownDebug("enchantmentDropdown.mouseClicked -> {}", enchantmentHandled);
+        if (enchantmentHandled) {
             successSoundDropdown.close();
+            logDropdownDebug("handleDropdownMouseClick consumed by enchantment dropdown");
             return true;
         }
-        if (successSoundDropdown.mouseClicked(mouseX, mouseY, button)) {
+
+        boolean successHandled = successSoundDropdown.mouseClicked(mouseX, mouseY, button);
+        logDropdownDebug("successSoundDropdown.mouseClicked -> {}", successHandled);
+        if (successHandled) {
             enchantmentDropdown.close();
+            logDropdownDebug("handleDropdownMouseClick consumed by success-sound dropdown");
             return true;
         }
 
         if (wasEnchantmentOpen || wasSuccessSoundOpen) {
             enchantmentDropdown.close();
             successSoundDropdown.close();
+            logDropdownDebug("handleDropdownMouseClick closed open dropdown(s) from outside click");
             return true;
         }
 
         enchantmentDropdown.close();
         successSoundDropdown.close();
+        logDropdownDebug("handleDropdownMouseClick no dropdown interaction, returning false");
         return false;
     }
 
@@ -440,9 +482,7 @@ public class TradeSelectorScreen extends Screen {
         boolean hovered = contains(mouseX, mouseY, x, y, w, h);
         int fillColor = hovered ? hoverFillColor : normalFillColor;
         int outlineColor = hovered ? hoverOutlineColor : normalOutlineColor;
-        // Fill background
         safeFill(graphics, x - 1, y - 1, x + w + 1, y + h + 1, fillColor);
-        // Draw black frame
         safeOutline(graphics, x - 1, y - 1, w + 2, h + 2, outlineColor);
     }
 
@@ -463,9 +503,7 @@ public class TradeSelectorScreen extends Screen {
         boolean hovered = !suppressHover && widget.isHoveredOrFocused();
         int fillColor = hovered ? hoverFillColor : normalFillColor;
         int outlineColor = hovered ? hoverOutlineColor : normalOutlineColor;
-        // Fill background
         safeFill(graphics, x, y, x + w, y + h, fillColor);
-        // Draw black frame
         safeOutline(graphics, x, y, w, h, outlineColor);
     }
 
@@ -596,84 +634,6 @@ public class TradeSelectorScreen extends Screen {
         return 0;
     }
 
-    private static Runnable pushDropdownLayer(GuiGraphics graphics) {
-        if (invokeNoArgVoid(graphics, "nextStratum")) {
-            return () -> {};
-        }
-
-        Object pose = invokeNoArgObject(graphics, "pose");
-        if (pose == null) {
-            return () -> {};
-        }
-
-        String popMethodName;
-        if (invokeNoArgVoid(pose, "pushPose")) {
-            popMethodName = "popPose";
-        } else if (invokeNoArgVoid(pose, "pushMatrix")) {
-            popMethodName = "popMatrix";
-        } else {
-            return () -> {};
-        }
-
-        invokeTranslate(pose);
-        return () -> invokeNoArgVoid(pose, popMethodName);
-    }
-
-    private static Object invokeNoArgObject(Object target, String methodName) {
-        if (target == null) {
-            return null;
-        }
-
-        try {
-            Method method = target.getClass().getMethod(methodName);
-            if (method.getParameterCount() != 0) {
-                return null;
-            }
-            return method.invoke(target);
-        } catch (ReflectiveOperationException ignored) {
-            return null;
-        }
-    }
-
-    private static boolean invokeNoArgVoid(Object target, String methodName) {
-        if (target == null) {
-            return false;
-        }
-
-        try {
-            Method method = target.getClass().getMethod(methodName);
-            if (method.getParameterCount() != 0) {
-                return false;
-            }
-            method.invoke(target);
-            return true;
-        } catch (ReflectiveOperationException ignored) {
-            return false;
-        }
-    }
-
-    private static void invokeTranslate(Object pose) {
-        try {
-            Method method = pose.getClass().getMethod("translate", double.class, double.class, double.class);
-            method.invoke(pose, 0.0, 0.0, 400.0);
-            return;
-        } catch (ReflectiveOperationException ignored) {
-        }
-
-        try {
-            Method method = pose.getClass().getMethod("translate", float.class, float.class, float.class);
-            method.invoke(pose, 0.0f, 0.0f, 400.0f);
-            return;
-        } catch (ReflectiveOperationException ignored) {
-        }
-
-        try {
-            Method method = pose.getClass().getMethod("translate", float.class, float.class);
-            method.invoke(pose, 0.0f, 0.0f);
-        } catch (ReflectiveOperationException ignored) {
-        }
-    }
-
     private static int withOpaqueAlpha(int color) {
         return (color & 0xFF000000) == 0 ? color | 0xFF000000 : color;
     }
@@ -681,6 +641,16 @@ public class TradeSelectorScreen extends Screen {
     private static void logTextRenderDebug(String key, String message) {
         if (TEXT_RENDER_DEBUG_EVENTS.add(key)) {
             LOGGER.info("[TradeSelectorScreen/TextDebug] {}", message);
+        }
+    }
+
+    private static void logDropdownDebug(String message, Object... args) {
+        LOGGER.info("[TradeSelectorScreen/DropdownDebug] " + message, args);
+    }
+
+    private static void logDropdownDebugOnce(String key, String message, Object... args) {
+        if (DROPDOWN_DEBUG_EVENTS.add(key)) {
+            LOGGER.info("[TradeSelectorScreen/DropdownDebug] " + message, args);
         }
     }
 
@@ -793,6 +763,428 @@ public class TradeSelectorScreen extends Screen {
         return mouseX >= left && mouseX < left + boxWidth && mouseY >= top && mouseY < top + boxHeight;
     }
 
+    private static final class DropdownRenderCompatHelper {
+        private static Boolean modernGuiPipeline;
+
+        private static boolean registerModernMouseBridge(TradeSelectorScreen screen) {
+            try {
+                Object allowMouseClickEvent = ScreenMouseEvents.allowMouseClick(screen);
+                Method registerMethod = findSingleParameterMethod(allowMouseClickEvent.getClass(), "register");
+                if (registerMethod == null) {
+                    logDropdownDebug("Modern mouse bridge registration skipped: register method not found");
+                    return false;
+                }
+
+                Class<?> listenerType = resolveAllowMouseClickListenerType(registerMethod);
+                if (listenerType == null) {
+                    logDropdownDebug("Modern mouse bridge registration skipped: listener interface not found");
+                    return false;
+                }
+
+                Object listener = Proxy.newProxyInstance(
+                        listenerType.getClassLoader(),
+                        new Class<?>[]{listenerType},
+                        (proxy, method, args) -> {
+                            if (method.getDeclaringClass() == Object.class) {
+                                return invokeProxyObjectMethod(proxy, method, args);
+                            }
+                            if (!"allowMouseClick".equals(method.getName())) {
+                                return true;
+                            }
+
+                            MouseClickData clickData = decodeBridgeClickData(args);
+                            if (clickData == null) {
+                                logDropdownDebugOnce(
+                                        "bridge_click_decode_failed",
+                                        "Modern mouse bridge could not decode click callback args; passing click through"
+                                );
+                                return true;
+                            }
+
+                            if (clickData.screen != screen) {
+                                return true;
+                            }
+
+                            logDropdownDebug(
+                                    "modern mouse bridge entry x={} y={} button={}",
+                                    clickData.mouseX,
+                                    clickData.mouseY,
+                                    clickData.button
+                            );
+                            boolean handled = screen.handleDropdownMouseClick(clickData.mouseX, clickData.mouseY, clickData.button);
+                            logDropdownDebug("modern mouse bridge handled={}", handled);
+                            return !handled;
+                        }
+                );
+
+                if (!registerEventListener(allowMouseClickEvent, listener)) {
+                    logDropdownDebug("Modern mouse bridge registration skipped: event object is not Fabric Event");
+                    return false;
+                }
+            } catch (RuntimeException exception) {
+                logDropdownDebug("Modern mouse bridge registration failed: {}", exception.toString());
+                return false;
+            }
+
+            logDropdownDebugOnce(
+                    "modern_bridge_registered",
+                    "Modern mouse bridge registered (modernGuiPipeline={} runtime version={})",
+                    isModernGuiPipeline(),
+                    safeRuntimeVersionName()
+            );
+            return true;
+        }
+
+        private static MouseClickData decodeBridgeClickData(Object[] args) {
+            if (args == null || args.length == 0 || !(args[0] instanceof Screen clickedScreen)) {
+                return null;
+            }
+
+            if (args.length >= 4 && args[1] instanceof Number mouseXArg
+                    && args[2] instanceof Number mouseYArg && args[3] instanceof Number buttonArg) {
+                return new MouseClickData(
+                        clickedScreen,
+                        mouseXArg.doubleValue(),
+                        mouseYArg.doubleValue(),
+                        buttonArg.intValue()
+                );
+            }
+
+            if (args.length >= 2 && args[1] != null) {
+                Object mouseClickData = args[1];
+                Double mouseX = readDouble(mouseClickData, "x", "mouseX", "getX");
+                Double mouseY = readDouble(mouseClickData, "y", "mouseY", "getY");
+                Integer button = readInt(mouseClickData, "button", "mouseButton", "getButton");
+
+                if (mouseX != null && mouseY != null && button != null) {
+                    return new MouseClickData(clickedScreen, mouseX, mouseY, button);
+                }
+
+                List<Double> doubles = readAllDoubles(mouseClickData);
+                List<Integer> ints = readAllInts(mouseClickData);
+                if (doubles.size() >= 2 && !ints.isEmpty()) {
+                    return new MouseClickData(clickedScreen, doubles.get(0), doubles.get(1), ints.get(0));
+                }
+            }
+
+            return null;
+        }
+
+        private static Method findSingleParameterMethod(Class<?> type, String name) {
+            Method fallbackMethod = null;
+            for (Method method : type.getMethods()) {
+                if (!method.getName().equals(name) || method.getParameterCount() != 1) {
+                    continue;
+                }
+                if (method.getParameterTypes()[0].isInterface()) {
+                    return method;
+                }
+                if (fallbackMethod == null) {
+                    fallbackMethod = method;
+                }
+            }
+            return fallbackMethod;
+        }
+
+        @SuppressWarnings({"rawtypes", "unchecked"})
+        private static boolean registerEventListener(Object eventObject, Object listener) {
+            if (eventObject instanceof Event<?> event) {
+                ((Event) event).register(listener);
+                return true;
+            }
+            return false;
+        }
+
+        private static Class<?> resolveAllowMouseClickListenerType(Method registerMethod) {
+            if (registerMethod != null) {
+                Class<?> parameterType = registerMethod.getParameterTypes()[0];
+                if (parameterType.isInterface()) {
+                    return parameterType;
+                }
+            }
+
+            for (Class<?> nestedType : ScreenMouseEvents.class.getDeclaredClasses()) {
+                if (!nestedType.isInterface()) {
+                    continue;
+                }
+                if ("AllowMouseClick".equals(nestedType.getSimpleName())) {
+                    return nestedType;
+                }
+            }
+
+            try {
+                Class<?> resolvedType = Class.forName(
+                        "net.fabricmc.fabric.api.client.screen.v1.ScreenMouseEvents$AllowMouseClick"
+                );
+                return resolvedType.isInterface() ? resolvedType : null;
+            } catch (ClassNotFoundException ignored) {
+                return null;
+            }
+        }
+
+        private static Object invokeProxyObjectMethod(Object proxy, Method method, Object[] args) {
+            return switch (method.getName()) {
+                case "toString" -> "TradeSelectorScreenModernMouseBridgeProxy";
+                case "hashCode" -> System.identityHashCode(proxy);
+                case "equals" -> proxy == (args != null && args.length > 0 ? args[0] : null);
+                default -> null;
+            };
+        }
+
+        private static Double readDouble(Object target, String... candidateNames) {
+            Number value = readNumberFromNoArgMethod(target, candidateNames);
+            if (value != null) {
+                return value.doubleValue();
+            }
+            value = readNumberFromField(target, candidateNames);
+            return value == null ? null : value.doubleValue();
+        }
+
+        private static Integer readInt(Object target, String... candidateNames) {
+            Number value = readNumberFromNoArgMethod(target, candidateNames);
+            if (value != null) {
+                return value.intValue();
+            }
+            value = readNumberFromField(target, candidateNames);
+            return value == null ? null : value.intValue();
+        }
+
+        private static Number readNumberFromNoArgMethod(Object target, String... candidateNames) {
+            if (target == null) {
+                return null;
+            }
+
+            Class<?> targetClass = target.getClass();
+            for (String candidateName : candidateNames) {
+                try {
+                    Method method = targetClass.getMethod(candidateName);
+                    if (method.getParameterCount() != 0) {
+                        continue;
+                    }
+                    Object value = method.invoke(target);
+                    if (value instanceof Number number) {
+                        return number;
+                    }
+                } catch (ReflectiveOperationException ignored) {
+                }
+            }
+
+            return null;
+        }
+
+        private static Number readNumberFromField(Object target, String... candidateNames) {
+            if (target == null) {
+                return null;
+            }
+
+            Class<?> type = target.getClass();
+            for (String candidateName : candidateNames) {
+                try {
+                    Field field = type.getDeclaredField(candidateName);
+                    field.setAccessible(true);
+                    Object value = field.get(target);
+                    if (value instanceof Number number) {
+                        return number;
+                    }
+                } catch (ReflectiveOperationException ignored) {
+                }
+            }
+
+            return null;
+        }
+
+        private static List<Double> readAllDoubles(Object target) {
+            List<Double> values = new ArrayList<>();
+            if (target == null) {
+                return values;
+            }
+
+            for (Method method : target.getClass().getMethods()) {
+                if (method.getParameterCount() != 0 || method.getReturnType() != double.class) {
+                    continue;
+                }
+                if (method.getDeclaringClass() == Object.class) {
+                    continue;
+                }
+                try {
+                    values.add((double) method.invoke(target));
+                } catch (ReflectiveOperationException ignored) {
+                }
+            }
+            return values;
+        }
+
+        private static List<Integer> readAllInts(Object target) {
+            List<Integer> values = new ArrayList<>();
+            if (target == null) {
+                return values;
+            }
+
+            for (Method method : target.getClass().getMethods()) {
+                if (method.getParameterCount() != 0 || method.getReturnType() != int.class) {
+                    continue;
+                }
+                if (method.getDeclaringClass() == Object.class) {
+                    continue;
+                }
+                try {
+                    values.add((int) method.invoke(target));
+                } catch (ReflectiveOperationException ignored) {
+                }
+            }
+            return values;
+        }
+
+        private static final class MouseClickData {
+            private final Screen screen;
+            private final double mouseX;
+            private final double mouseY;
+            private final int button;
+
+            private MouseClickData(Screen screen, double mouseX, double mouseY, int button) {
+                this.screen = screen;
+                this.mouseX = mouseX;
+                this.mouseY = mouseY;
+                this.button = button;
+            }
+        }
+
+        private static void renderWidgetsAndDropdownOverlay(
+                TradeSelectorScreen screen,
+                GuiGraphics graphics,
+                int mouseX,
+                int mouseY,
+                float delta,
+                boolean dropdownOpen,
+                Runnable renderDropdownMenus,
+                AbstractWidget... widgets
+        ) {
+            if (isModernGuiPipeline()) {
+                logDropdownDebugOnce("render_path_modern", "Render path: modern GUI pipeline");
+                screen.renderVanillaWidgets(graphics, mouseX, mouseY, delta);
+                advanceDropdownOverlayLayer(graphics);
+                renderDropdownMenus.run();
+                return;
+            }
+
+            logDropdownDebugOnce("render_path_legacy", "Render path: legacy GUI pipeline");
+            Runnable restoreWidgets = suppressWhileDropdownOverlay(dropdownOpen, widgets);
+            try {
+                renderDropdownMenus.run();
+                screen.renderVanillaWidgets(graphics, mouseX, mouseY, delta);
+            } finally {
+                restoreWidgets.run();
+            }
+        }
+
+        private static Runnable suppressWhileDropdownOverlay(boolean dropdownOpen, AbstractWidget... widgets) {
+            if (!dropdownOpen || widgets == null || widgets.length == 0) {
+                return () -> {};
+            }
+
+            WidgetState[] states = new WidgetState[widgets.length];
+            for (int index = 0; index < widgets.length; index++) {
+                states[index] = new WidgetState(widgets[index]);
+                states[index].suppress();
+            }
+
+            return () -> {
+                for (WidgetState state : states) {
+                    state.restore();
+                }
+            };
+        }
+
+        private static boolean isModernGuiPipeline() {
+            if (modernGuiPipeline != null) {
+                return modernGuiPipeline;
+            }
+
+            modernGuiPipeline = isAtLeast1216Runtime();
+
+            logDropdownDebugOnce(
+                    "modern_pipeline_detected",
+                    "Detected modernGuiPipeline={} (runtime version={})",
+                    modernGuiPipeline,
+                    safeRuntimeVersionName()
+            );
+            return modernGuiPipeline;
+        }
+
+        private static String safeRuntimeVersionName() {
+            try {
+                return FabricLoader.getInstance()
+                        .getModContainer("minecraft")
+                        .map(container -> container.getMetadata().getVersion().getFriendlyString())
+                        .orElse("unknown");
+            } catch (Throwable ignored) {
+                return "unknown";
+            }
+        }
+
+        private static boolean isAtLeast1216Runtime() {
+            String versionName = safeRuntimeVersionName();
+            if (versionName == null || !versionName.startsWith("1.21.")) {
+                return false;
+            }
+
+            int patchStart = "1.21.".length();
+            int patchEnd = patchStart;
+            while (patchEnd < versionName.length() && Character.isDigit(versionName.charAt(patchEnd))) {
+                patchEnd++;
+            }
+
+            if (patchEnd <= patchStart) {
+                return false;
+            }
+
+            try {
+                int patchVersion = Integer.parseInt(versionName.substring(patchStart, patchEnd));
+                return patchVersion >= 6;
+            } catch (NumberFormatException ignored) {
+                return false;
+            }
+        }
+
+        private static void advanceDropdownOverlayLayer(GuiGraphics graphics) {
+            try {
+                Method method = GuiGraphics.class.getMethod("nextStratum");
+                if (method.getParameterCount() == 0) {
+                    method.invoke(graphics);
+                }
+            } catch (ReflectiveOperationException ignored) {
+            }
+        }
+
+        private static final class WidgetState {
+            private final AbstractWidget widget;
+            private final boolean visible;
+            private final boolean active;
+
+            private WidgetState(AbstractWidget widget) {
+                this.widget = widget;
+                this.visible = widget != null && widget.visible;
+                this.active = widget != null && widget.active;
+            }
+
+            private void suppress() {
+                if (widget == null) {
+                    return;
+                }
+                widget.visible = false;
+                widget.active = false;
+            }
+
+            private void restore() {
+                if (widget == null) {
+                    return;
+                }
+                widget.visible = visible;
+                widget.active = active;
+            }
+        }
+    }
+
     private static class Dropdown<T> {
         private static final int OPTION_HEIGHT = 18;
         private static final int MAX_VISIBLE_OPTIONS = 8;
@@ -851,8 +1243,14 @@ public class TradeSelectorScreen extends Screen {
             int visible = Math.min(MAX_VISIBLE_OPTIONS, values.size());
             int listHeight = visible * OPTION_HEIGHT;
             int listY = y + height + 1;
-            safeFill(graphics, x, listY, x + width, listY + listHeight, 0xFF242424);
+            int listBottom = listY + listHeight;
+
+            safeFill(graphics, x, listY, x + width, listBottom, 0xFF000000);
+            safeFill(graphics, x, listY, x + width, listBottom, 0xFF1A1A1A);
+            safeFill(graphics, x, listY, x + width, listBottom, 0xFF242424);
+
             safeOutline(graphics, x, listY, width, listHeight, 0xFFFFFFFF);
+
             for (int row = 0; row < visible; row++) {
                 int index = scrollIndex + row;
                 if (index >= values.size()) {
@@ -862,25 +1260,42 @@ public class TradeSelectorScreen extends Screen {
                 int rowY = listY + row * OPTION_HEIGHT;
                 T option = values.get(index);
                 boolean rowHovered = contains(mouseX, mouseY, x, rowY, width, OPTION_HEIGHT);
-                if (rowHovered || option.equals(value)) {
-                    safeFill(graphics, x + 1, rowY + 1, x + width - 1, rowY + OPTION_HEIGHT - 1, rowHovered ? 0xFF555555 : 0xFF3C4E63);
-                }
+
+                safeFill(graphics, x + 1, rowY + 1, x + width - 1, rowY + OPTION_HEIGHT - 1,
+                        rowHovered ? 0xFF555555 : (option.equals(value) ? 0xFF3C4E63 : 0xFF242424));
+
                 safeDrawString(graphics, font, trim(labeler.apply(option), width - 12), x + 6, rowY + 5, 0xFFFFFF, false);
             }
         }
 
         boolean mouseClicked(double mouseX, double mouseY, int button) {
+            logDropdownDebug(
+                    "Dropdown.mouseClicked start button={} x={} y={} open={} bounds=({},{} {}x{})",
+                    button,
+                    mouseX,
+                    mouseY,
+                    open,
+                    x,
+                    y,
+                    width,
+                    height
+            );
+
             if (button != 0) {
+                logDropdownDebug("Dropdown.mouseClicked ignored non-left click");
                 return false;
             }
 
             if (contains(mouseX, mouseY, x, y, width, height)) {
+                boolean previousOpen = open;
                 open = !open;
                 scrollSelectedIntoView();
+                logDropdownDebug("Dropdown trigger clicked, open {} -> {}", previousOpen, open);
                 return true;
             }
 
             if (!open) {
+                logDropdownDebug("Dropdown.mouseClicked outside trigger while closed");
                 return false;
             }
 
@@ -888,6 +1303,7 @@ public class TradeSelectorScreen extends Screen {
             int listY = y + height + 1;
             if (!contains(mouseX, mouseY, x, listY, width, visible * OPTION_HEIGHT)) {
                 open = false;
+                logDropdownDebug("Dropdown open but click outside menu, closing");
                 return false;
             }
 
@@ -896,8 +1312,10 @@ public class TradeSelectorScreen extends Screen {
             if (index >= 0 && index < values.size()) {
                 value = values.get(index);
                 onChange.accept(value);
+                logDropdownDebug("Dropdown selected row={} index={} value={}", row, index, value);
             }
             open = false;
+            logDropdownDebug("Dropdown selection processed, closing");
             return true;
         }
 
