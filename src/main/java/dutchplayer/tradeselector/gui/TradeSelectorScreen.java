@@ -15,8 +15,6 @@ import net.minecraft.client.gui.components.EditBox;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
 import net.minecraft.util.FormattedCharSequence;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -24,14 +22,11 @@ import java.lang.reflect.Proxy;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Set;
 import java.util.function.Consumer;
 import java.util.function.Function;
 
 public class TradeSelectorScreen extends Screen {
-    private static final Logger LOGGER = LoggerFactory.getLogger("TradeSelector");
     private static final int PANEL_WIDTH = 330;
     private static final int PANEL_HEIGHT = 270;
     private static boolean supportsFill = true;
@@ -44,8 +39,6 @@ public class TradeSelectorScreen extends Screen {
     private static boolean drawStringFallbackResolved = false;
     private static Method drawStringFallbackMethod;
     private static boolean drawStringFallbackUsesShadow;
-    private static final Set<String> TEXT_RENDER_DEBUG_EVENTS = new HashSet<>();
-    private static final Set<String> DROPDOWN_DEBUG_EVENTS = new HashSet<>();
 
     private Dropdown<String> enchantmentDropdown;
     private Button levelModeButton;
@@ -212,26 +205,15 @@ public class TradeSelectorScreen extends Screen {
 
     @Override
     public boolean mouseClicked(double mouseX, double mouseY, int button) {
-        logDropdownDebug("mouseClicked entry x={} y={} button={}", mouseX, mouseY, button);
-
         if (modernMouseBridgeActive) {
-            boolean handledBySuper = super.mouseClicked(mouseX, mouseY, button);
-            logDropdownDebug("mouseClicked modern-bridge mode delegated to super, handledBySuper={}", handledBySuper);
-            return handledBySuper;
+            return super.mouseClicked(mouseX, mouseY, button);
         }
 
         if (handleDropdownMouseClick(mouseX, mouseY, button)) {
-            logDropdownDebug(
-                    "mouseClicked handled by dropdown layer (enchantOpen={}, successOpen={})",
-                    enchantmentDropdown.isOpen(),
-                    successSoundDropdown.isOpen()
-            );
             return true;
         }
 
-        boolean handledBySuper = super.mouseClicked(mouseX, mouseY, button);
-        logDropdownDebug("mouseClicked delegated to super, handledBySuper={}", handledBySuper);
-        return handledBySuper;
+        return super.mouseClicked(mouseX, mouseY, button);
     }
 
     @Override
@@ -268,41 +250,26 @@ public class TradeSelectorScreen extends Screen {
         boolean wasEnchantmentOpen = enchantmentDropdown.isOpen();
         boolean wasSuccessSoundOpen = successSoundDropdown.isOpen();
 
-        logDropdownDebug(
-                "handleDropdownMouseClick start button={} x={} y={} wasEnchantOpen={} wasSuccessOpen={}",
-                button,
-                mouseX,
-                mouseY,
-                wasEnchantmentOpen,
-                wasSuccessSoundOpen
-        );
-
         boolean enchantmentHandled = enchantmentDropdown.mouseClicked(mouseX, mouseY, button);
-        logDropdownDebug("enchantmentDropdown.mouseClicked -> {}", enchantmentHandled);
         if (enchantmentHandled) {
             successSoundDropdown.close();
-            logDropdownDebug("handleDropdownMouseClick consumed by enchantment dropdown");
             return true;
         }
 
         boolean successHandled = successSoundDropdown.mouseClicked(mouseX, mouseY, button);
-        logDropdownDebug("successSoundDropdown.mouseClicked -> {}", successHandled);
         if (successHandled) {
             enchantmentDropdown.close();
-            logDropdownDebug("handleDropdownMouseClick consumed by success-sound dropdown");
             return true;
         }
 
         if (wasEnchantmentOpen || wasSuccessSoundOpen) {
             enchantmentDropdown.close();
             successSoundDropdown.close();
-            logDropdownDebug("handleDropdownMouseClick closed open dropdown(s) from outside click");
             return true;
         }
 
         enchantmentDropdown.close();
         successSoundDropdown.close();
-        logDropdownDebug("handleDropdownMouseClick no dropdown interaction, returning false");
         return false;
     }
 
@@ -541,41 +508,33 @@ public class TradeSelectorScreen extends Screen {
 
         if (supportsDrawStringWithShadow) {
             try {
-                logTextRenderDebug("draw_string_with_shadow", "Text renderer using GuiGraphics.drawString(String, shadow)");
                 return graphics.drawString(font, text, x, y, drawColor, dropShadow);
             } catch (NoSuchMethodError ignored) {
                 supportsDrawStringWithShadow = false;
-                logTextRenderDebug("draw_string_with_shadow_missing", "GuiGraphics.drawString(String, shadow) missing on this runtime");
             }
         }
 
         if (supportsDrawStringWithoutShadow) {
             try {
-                logTextRenderDebug("draw_string_without_shadow", "Text renderer using GuiGraphics.drawString(String)");
                 return graphics.drawString(font, text, x, y, drawColor);
             } catch (NoSuchMethodError ignored) {
                 supportsDrawStringWithoutShadow = false;
-                logTextRenderDebug("draw_string_without_shadow_missing", "GuiGraphics.drawString(String) missing on this runtime");
             }
         }
 
         if (supportsDrawFormattedWithShadow) {
             try {
-                logTextRenderDebug("draw_formatted_with_shadow", "Text renderer using GuiGraphics.drawString(FormattedCharSequence, shadow)");
                 return graphics.drawString(font, formatted, x, y, drawColor, dropShadow);
             } catch (NoSuchMethodError ignored) {
                 supportsDrawFormattedWithShadow = false;
-                logTextRenderDebug("draw_formatted_with_shadow_missing", "GuiGraphics.drawString(FormattedCharSequence, shadow) missing on this runtime");
             }
         }
 
         if (supportsDrawFormattedWithoutShadow) {
             try {
-                logTextRenderDebug("draw_formatted_without_shadow", "Text renderer using GuiGraphics.drawString(FormattedCharSequence)");
                 return graphics.drawString(font, formatted, x, y, drawColor);
             } catch (NoSuchMethodError ignored) {
                 supportsDrawFormattedWithoutShadow = false;
-                logTextRenderDebug("draw_formatted_without_shadow_missing", "GuiGraphics.drawString(FormattedCharSequence) missing on this runtime");
             }
         }
 
@@ -592,21 +551,17 @@ public class TradeSelectorScreen extends Screen {
                     }
 
                     if (result instanceof Integer drawnWidth) {
-                        logTextRenderDebug("draw_reflection_return_int", "Text renderer using reflection fallback (int return)");
                         return drawnWidth;
                     }
 
-                    logTextRenderDebug("draw_reflection_return_nonint", "Text renderer using reflection fallback (non-int return)");
                     return font.width(text);
                 }
             } catch (Throwable ignored) {
-                logTextRenderDebug("draw_reflection_failed", "Reflection text fallback failed at runtime");
             }
         }
 
         if (supportsFontDrawInBatch) {
             try {
-                logTextRenderDebug("draw_font_batch", "Text renderer using Font.drawInBatch fallback");
                 int rendered = font.drawInBatch(
                         formatted,
                         (float) x,
@@ -623,35 +578,16 @@ public class TradeSelectorScreen extends Screen {
                 return rendered;
             } catch (NoSuchMethodError ignored) {
                 supportsFontDrawInBatch = false;
-                logTextRenderDebug("draw_font_batch_missing", "Font.drawInBatch fallback missing on this runtime");
             } catch (Throwable ignored) {
-                logTextRenderDebug("draw_font_batch_failed", "Font.drawInBatch fallback failed at runtime");
                 return 0;
             }
         }
 
-        logTextRenderDebug("draw_all_paths_failed", "All TradeSelectorScreen text rendering paths failed; text will be invisible");
         return 0;
     }
 
     private static int withOpaqueAlpha(int color) {
         return (color & 0xFF000000) == 0 ? color | 0xFF000000 : color;
-    }
-
-    private static void logTextRenderDebug(String key, String message) {
-        if (TEXT_RENDER_DEBUG_EVENTS.add(key)) {
-            LOGGER.info("[TradeSelectorScreen/TextDebug] {}", message);
-        }
-    }
-
-    private static void logDropdownDebug(String message, Object... args) {
-        LOGGER.info("[TradeSelectorScreen/DropdownDebug] " + message, args);
-    }
-
-    private static void logDropdownDebugOnce(String key, String message, Object... args) {
-        if (DROPDOWN_DEBUG_EVENTS.add(key)) {
-            LOGGER.info("[TradeSelectorScreen/DropdownDebug] " + message, args);
-        }
     }
 
     private static void safeDrawCenteredString(GuiGraphics graphics, Font font, Component text, int centerX, int y, int color) {
@@ -715,15 +651,6 @@ public class TradeSelectorScreen extends Screen {
             }
         }
 
-        if (drawStringFallbackMethod != null) {
-            logTextRenderDebug(
-                    "draw_reflection_method_selected",
-                    "Selected reflection text fallback method: " + drawStringFallbackMethod
-            );
-        } else {
-            logTextRenderDebug("draw_reflection_method_missing", "No compatible reflection text fallback method found");
-        }
-
         return drawStringFallbackMethod;
     }
 
@@ -771,13 +698,11 @@ public class TradeSelectorScreen extends Screen {
                 Object allowMouseClickEvent = ScreenMouseEvents.allowMouseClick(screen);
                 Method registerMethod = findSingleParameterMethod(allowMouseClickEvent.getClass(), "register");
                 if (registerMethod == null) {
-                    logDropdownDebug("Modern mouse bridge registration skipped: register method not found");
                     return false;
                 }
 
                 Class<?> listenerType = resolveAllowMouseClickListenerType(registerMethod);
                 if (listenerType == null) {
-                    logDropdownDebug("Modern mouse bridge registration skipped: listener interface not found");
                     return false;
                 }
 
@@ -794,10 +719,6 @@ public class TradeSelectorScreen extends Screen {
 
                             MouseClickData clickData = decodeBridgeClickData(args);
                             if (clickData == null) {
-                                logDropdownDebugOnce(
-                                        "bridge_click_decode_failed",
-                                        "Modern mouse bridge could not decode click callback args; passing click through"
-                                );
                                 return true;
                             }
 
@@ -805,33 +726,18 @@ public class TradeSelectorScreen extends Screen {
                                 return true;
                             }
 
-                            logDropdownDebug(
-                                    "modern mouse bridge entry x={} y={} button={}",
-                                    clickData.mouseX,
-                                    clickData.mouseY,
-                                    clickData.button
-                            );
                             boolean handled = screen.handleDropdownMouseClick(clickData.mouseX, clickData.mouseY, clickData.button);
-                            logDropdownDebug("modern mouse bridge handled={}", handled);
                             return !handled;
                         }
                 );
 
                 if (!registerEventListener(allowMouseClickEvent, listener)) {
-                    logDropdownDebug("Modern mouse bridge registration skipped: event object is not Fabric Event");
                     return false;
                 }
             } catch (RuntimeException exception) {
-                logDropdownDebug("Modern mouse bridge registration failed: {}", exception.toString());
                 return false;
             }
 
-            logDropdownDebugOnce(
-                    "modern_bridge_registered",
-                    "Modern mouse bridge registered (modernGuiPipeline={} runtime version={})",
-                    isModernGuiPipeline(),
-                    safeRuntimeVersionName()
-            );
             return true;
         }
 
@@ -1060,14 +966,12 @@ public class TradeSelectorScreen extends Screen {
                 AbstractWidget... widgets
         ) {
             if (isModernGuiPipeline()) {
-                logDropdownDebugOnce("render_path_modern", "Render path: modern GUI pipeline");
                 screen.renderVanillaWidgets(graphics, mouseX, mouseY, delta);
                 advanceDropdownOverlayLayer(graphics);
                 renderDropdownMenus.run();
                 return;
             }
 
-            logDropdownDebugOnce("render_path_legacy", "Render path: legacy GUI pipeline");
             Runnable restoreWidgets = suppressWhileDropdownOverlay(dropdownOpen, widgets);
             try {
                 renderDropdownMenus.run();
@@ -1101,13 +1005,6 @@ public class TradeSelectorScreen extends Screen {
             }
 
             modernGuiPipeline = isAtLeast1216Runtime();
-
-            logDropdownDebugOnce(
-                    "modern_pipeline_detected",
-                    "Detected modernGuiPipeline={} (runtime version={})",
-                    modernGuiPipeline,
-                    safeRuntimeVersionName()
-            );
             return modernGuiPipeline;
         }
 
@@ -1269,33 +1166,17 @@ public class TradeSelectorScreen extends Screen {
         }
 
         boolean mouseClicked(double mouseX, double mouseY, int button) {
-            logDropdownDebug(
-                    "Dropdown.mouseClicked start button={} x={} y={} open={} bounds=({},{} {}x{})",
-                    button,
-                    mouseX,
-                    mouseY,
-                    open,
-                    x,
-                    y,
-                    width,
-                    height
-            );
-
             if (button != 0) {
-                logDropdownDebug("Dropdown.mouseClicked ignored non-left click");
                 return false;
             }
 
             if (contains(mouseX, mouseY, x, y, width, height)) {
-                boolean previousOpen = open;
                 open = !open;
                 scrollSelectedIntoView();
-                logDropdownDebug("Dropdown trigger clicked, open {} -> {}", previousOpen, open);
                 return true;
             }
 
             if (!open) {
-                logDropdownDebug("Dropdown.mouseClicked outside trigger while closed");
                 return false;
             }
 
@@ -1303,7 +1184,6 @@ public class TradeSelectorScreen extends Screen {
             int listY = y + height + 1;
             if (!contains(mouseX, mouseY, x, listY, width, visible * OPTION_HEIGHT)) {
                 open = false;
-                logDropdownDebug("Dropdown open but click outside menu, closing");
                 return false;
             }
 
@@ -1312,10 +1192,8 @@ public class TradeSelectorScreen extends Screen {
             if (index >= 0 && index < values.size()) {
                 value = values.get(index);
                 onChange.accept(value);
-                logDropdownDebug("Dropdown selected row={} index={} value={}", row, index, value);
             }
             open = false;
-            logDropdownDebug("Dropdown selection processed, closing");
             return true;
         }
 
