@@ -1,14 +1,11 @@
 {
-	"required": true,
-	"package": "dutchplayer.tradeselector.mixin",
-	"compatibilityLevel": "JAVA_21",
-	"mixins": [
-		"ExampleMixin"
-	],
-	"injectors": {
-		"defaultRequire": 1
-	},
-	"overwrites": {
-		"requireAnnotations": true
-	}
+  "required": false,
+  "package": "dutchplayer.tradeselector.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "client": [
+    "ReduceFPSMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 0
+  }
 }
